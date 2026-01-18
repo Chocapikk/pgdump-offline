@@ -16,7 +16,8 @@ jobs:
           go-version: '1.22'
       - run: go test -v ./... -run "TestDecode|TestParseJSONB"
 
-  integration:
+  # Linux integration tests with Docker
+  integration-linux:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -123,7 +124,105 @@ jobs:
         if: always()
         run: docker rm -f pg || true
 
+  # macOS integration test
+  integration-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install PostgreSQL
+        run: |
+          brew install postgresql@16
+          brew services start postgresql@16
+          sleep 5
+          
+          # Create test database
+          /opt/homebrew/opt/postgresql@16/bin/createdb -h localhost testdb || \
+          /usr/local/opt/postgresql@16/bin/createdb -h localhost testdb
+
+      - name: Create test data
+        run: |
+          PSQL=$(/opt/homebrew/opt/postgresql@16/bin/psql 2>/dev/null && echo /opt/homebrew/opt/postgresql@16/bin/psql || echo /usr/local/opt/postgresql@16/bin/psql)
+          $PSQL -h localhost -d testdb << 'EOF'
+          CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));
+          INSERT INTO users (email, password_hash) VALUES ('admin@test.com', '$argon2id$hash');
+          CREATE TABLE secrets (id SERIAL, name VARCHAR(255), value JSONB);
+          INSERT INTO secrets (name, value) VALUES ('aws', '{"key": "AKIA..."}');
+          CHECKPOINT;
+          EOF
+
+      - name: Build
+        run: go build -o pgdump-offline .
+
+      - name: Test auto-detection
+        run: |
+          echo "=== Testing -detect ==="
+          ./pgdump-offline -detect
+          
+          echo "=== Testing -list-db ==="
+          ./pgdump-offline -list-db
+          
+          echo "=== Testing auto-detect dump ==="
+          ./pgdump-offline -db testdb -t users | jq .
+
+  # Windows integration test  
+  integration-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install PostgreSQL
+        shell: pwsh
+        run: |
+          choco install postgresql16 --params '/Password:testpass' -y
+          refreshenv
+          
+          # Wait for service
+          Start-Sleep -Seconds 10
+          
+          # Add to PATH
+          $env:PATH = "C:\Program Files\PostgreSQL\16\bin;$env:PATH"
+          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, "Process")
+
+      - name: Create test data
+        shell: pwsh
+        run: |
+          $env:PGPASSWORD = "testpass"
+          $env:PATH = "C:\Program Files\PostgreSQL\16\bin;$env:PATH"
+          
+          & psql -U postgres -c "CREATE DATABASE testdb;"
+          & psql -U postgres -d testdb -c "CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));"
+          & psql -U postgres -d testdb -c "INSERT INTO users (email, password_hash) VALUES ('admin@test.com', '\$argon2id\$hash');"
+          & psql -U postgres -d testdb -c "CREATE TABLE secrets (id SERIAL, name VARCHAR(255), value JSONB);"
+          & psql -U postgres -d testdb -c "INSERT INTO secrets (name, value) VALUES ('aws', '{\"key\": \"AKIA...\"}');"
+          & psql -U postgres -d testdb -c "CHECKPOINT;"
+
+      - name: Build
+        run: go build -o pgdump-offline.exe .
+
+      - name: Test auto-detection
+        shell: pwsh
+        run: |
+          Write-Host "=== Testing -detect ==="
+          .\pgdump-offline.exe -detect
+          
+          Write-Host "=== Testing -list-db ==="
+          .\pgdump-offline.exe -list-db
+          
+          Write-Host "=== Testing dump ==="
+          .\pgdump-offline.exe -db testdb -t users
+
   build:
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-linux, integration-macos, integration-windows]
     runs-on: ubuntu-latest
     needs: [unit-tests, integration]
     steps:
