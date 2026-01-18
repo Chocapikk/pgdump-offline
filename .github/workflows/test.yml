@@ -482,9 +482,12 @@ jobs:
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));"
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "INSERT INTO users (email, password_hash) VALUES ('admin@test.com', 'argon2hash');"
           
-          # Test multiple types
+          # Test multiple types - use single quotes for JSON to avoid PowerShell escaping issues
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "CREATE TABLE type_test (col_int INTEGER, col_text TEXT, col_bool BOOLEAN, col_float DOUBLE PRECISION, col_uuid UUID, col_inet INET, col_point POINT, col_jsonb JSONB, col_date DATE);"
-          & "$env:PG_PATH\psql" -U postgres -d testdb -c "INSERT INTO type_test VALUES (42, 'test', true, 3.14, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '192.168.1.1', '(1,2)', '{\"secret\": \"pass\"}', '2025-01-18');"
+          
+          # Use a variable for the SQL to handle JSON properly
+          $sql = "INSERT INTO type_test VALUES (42, 'test', true, 3.14, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '192.168.1.1', '(1,2)', '{""secret"": ""pass""}', '2025-01-18');"
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c $sql
           
           # Verify data is in database
           Write-Host "=== Verifying data in database ==="
