@@ -47,11 +47,21 @@ func DecodeTuple(tuple *HeapTupleData, columns []Column) map[string]interface{} 
 			num = idx + 1
 		}
 
-		// Use column's alignment from pg_attribute if available
+		// For varlena types, check if we have a short varlena (1-byte header)
+		// Short varlena only needs 1-byte alignment, not the standard 4-byte
 		colAlign := alignFromChar(col.Align)
 		if colAlign == 0 {
 			colAlign = typeAlign(col.TypID, col.Len)
 		}
+		
+		// Special handling for varlena: short varlena uses 1-byte alignment
+		if col.Len == -1 && offset < len(tuple.Data) {
+			// Try 1-byte alignment first to check for short varlena
+			if isShortVarlena(tuple.Data[offset:]) {
+				colAlign = 1
+			}
+		}
+		
 		prevOffset := offset
 		offset = align(offset, colAlign)
 
@@ -188,6 +198,16 @@ func readValue(data []byte, offset, typID, length int) (interface{}, int) {
 		}
 	}
 	return string(remaining), len(remaining)
+}
+
+// isShortVarlena checks if data starts with a short varlena header
+func isShortVarlena(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	first := data[0]
+	// Short varlena: bit 0 is set, but not just 0x01 (which is TOAST)
+	return first&1 == 1 && first != 1
 }
 
 func max(a, b int) int {
