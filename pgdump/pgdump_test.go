@@ -1020,3 +1020,388 @@ func TestDecodeArrayBasic(t *testing.T) {
 		t.Errorf("Expected 3 elements, got %d", len(arr))
 	}
 }
+
+// === Tuple and Heap tests ===
+
+func TestIsVisible(t *testing.T) {
+	tests := []struct {
+		name    string
+		header  *HeapTupleHeader
+		visible bool
+	}{
+		{
+			name: "committed and not deleted",
+			header: &HeapTupleHeader{
+				XminCommitted: true,
+				XmaxInvalid:   true,
+				XmaxCommitted: false,
+			},
+			visible: true,
+		},
+		{
+			name: "committed with invalid xmax",
+			header: &HeapTupleHeader{
+				XminCommitted: true,
+				XmaxInvalid:   true,
+				XmaxCommitted: true,
+			},
+			visible: true,
+		},
+		{
+			name: "not committed",
+			header: &HeapTupleHeader{
+				XminCommitted: false,
+				XmaxInvalid:   true,
+				XmaxCommitted: false,
+			},
+			visible: false,
+		},
+		{
+			name: "deleted (xmax committed)",
+			header: &HeapTupleHeader{
+				XminCommitted: true,
+				XmaxInvalid:   false,
+				XmaxCommitted: true,
+			},
+			visible: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tuple := &HeapTupleData{Header: tt.header}
+			if got := tuple.IsVisible(); got != tt.visible {
+				t.Errorf("IsVisible() = %v, want %v", got, tt.visible)
+			}
+		})
+	}
+}
+
+func TestIsNull(t *testing.T) {
+	tests := []struct {
+		name   string
+		bitmap []byte
+		attnum int
+		isNull bool
+	}{
+		{"nil bitmap", nil, 1, false},
+		{"attnum 0", []byte{0xFF}, 0, false},
+		{"attnum 1 not null", []byte{0x01}, 1, false},     // bit 0 = 1
+		{"attnum 1 null", []byte{0x00}, 1, true},          // bit 0 = 0
+		{"attnum 2 not null", []byte{0x02}, 2, false},     // bit 1 = 1
+		{"attnum 2 null", []byte{0x01}, 2, true},          // bit 1 = 0
+		{"attnum 9 not null", []byte{0x00, 0x01}, 9, false}, // bit 8 = 1
+		{"attnum 9 null", []byte{0x00, 0x00}, 9, true},    // bit 8 = 0
+		{"attnum beyond bitmap", []byte{0xFF}, 10, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tuple := &HeapTupleData{
+				Header: &HeapTupleHeader{HasNull: tt.bitmap != nil},
+				Bitmap: tt.bitmap,
+			}
+			if got := tuple.IsNull(tt.attnum); got != tt.isNull {
+				t.Errorf("IsNull(%d) = %v, want %v", tt.attnum, got, tt.isNull)
+			}
+		})
+	}
+}
+
+func TestAlignFromChar(t *testing.T) {
+	tests := []struct {
+		char  byte
+		align int
+	}{
+		{'c', 1},
+		{'s', 2},
+		{'i', 4},
+		{'d', 8},
+		{'x', 0}, // unknown
+		{0, 0},
+	}
+
+	for _, tt := range tests {
+		got := alignFromChar(tt.char)
+		if got != tt.align {
+			t.Errorf("alignFromChar('%c') = %d, want %d", tt.char, got, tt.align)
+		}
+	}
+}
+
+func TestTypeAlign(t *testing.T) {
+	tests := []struct {
+		typID  int
+		length int
+		align  int
+	}{
+		// Double aligned (8 bytes)
+		{OidInt8, 8, 8},
+		{OidFloat8, 8, 8},
+		{OidTimestamp, 8, 8},
+		{OidPoint, 16, 8},
+		// Int aligned (4 bytes)
+		{OidInt4, 4, 4},
+		{OidFloat4, 4, 4},
+		{OidText, -1, 4},
+		{OidJSONB, -1, 4},
+		// Short aligned (2 bytes)
+		{OidInt2, 2, 2},
+		// Char aligned (1 byte)
+		{OidBool, 1, 1},
+		{OidChar, 1, 1},
+		{OidUUID, 16, 1},
+		// Default based on length
+		{99999, 16, 8},  // >= 8
+		{99999, 4, 4},   // >= 4
+		{99999, 2, 2},   // >= 2
+		{99999, 1, 1},   // < 2
+		{99999, -1, 4},  // varlena
+	}
+
+	for _, tt := range tests {
+		got := typeAlign(tt.typID, tt.length)
+		if got != tt.align {
+			t.Errorf("typeAlign(%d, %d) = %d, want %d", tt.typID, tt.length, got, tt.align)
+		}
+	}
+}
+
+func TestIsShortVarlena(t *testing.T) {
+	tests := []struct {
+		name  string
+		data  []byte
+		short bool
+	}{
+		{"empty", []byte{}, false},
+		{"short varlena", []byte{0x0d}, true},        // bit 0 set, not 0x01
+		{"short varlena 2", []byte{0x03}, true},      // bit 0 set, not 0x01
+		{"long varlena", []byte{0x00}, false},        // bit 0 not set
+		{"TOAST pointer", []byte{0x01}, false},       // exactly 0x01
+		{"long header", []byte{0x18, 0x00}, false},   // bit 0 not set
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isShortVarlena(tt.data); got != tt.short {
+				t.Errorf("isShortVarlena(%v) = %v, want %v", tt.data, got, tt.short)
+			}
+		})
+	}
+}
+
+func TestMax(t *testing.T) {
+	tests := []struct {
+		a, b, want int
+	}{
+		{1, 2, 2},
+		{2, 1, 2},
+		{5, 5, 5},
+		{-1, 0, 0},
+		{0, -1, 0},
+	}
+
+	for _, tt := range tests {
+		if got := max(tt.a, tt.b); got != tt.want {
+			t.Errorf("max(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+func TestReadValueFixedLength(t *testing.T) {
+	// Test reading fixed-length int4
+	data := []byte{0x2A, 0x00, 0x00, 0x00} // 42 in little-endian
+	val, consumed := readValue(data, 0, OidInt4, 4)
+	if consumed != 4 {
+		t.Errorf("consumed = %d, want 4", consumed)
+	}
+	if val != int32(42) {
+		t.Errorf("val = %v, want 42", val)
+	}
+}
+
+func TestReadValueVarlena(t *testing.T) {
+	// Short varlena: "hi" (length=3 including header)
+	data := []byte{0x07, 'h', 'i'} // short varlena: (3<<1)|1 = 7
+	val, consumed := readValue(data, 0, OidText, -1)
+	if consumed != 3 {
+		t.Errorf("consumed = %d, want 3", consumed)
+	}
+	if val != "hi" {
+		t.Errorf("val = %v, want 'hi'", val)
+	}
+}
+
+func TestReadValueCString(t *testing.T) {
+	data := []byte{'h', 'e', 'l', 'l', 'o', 0, 'x', 'x'}
+	val, consumed := readValue(data, 0, OidName, -2) // -2 for cstring
+	if consumed != 6 {
+		t.Errorf("consumed = %d, want 6", consumed)
+	}
+	if val != "hello" {
+		t.Errorf("val = %v, want 'hello'", val)
+	}
+}
+
+func TestReadValueOutOfBounds(t *testing.T) {
+	data := []byte{0x01, 0x02}
+	val, consumed := readValue(data, 10, OidInt4, 4) // offset beyond data
+	if val != nil || consumed != 0 {
+		t.Errorf("expected nil/0, got %v/%d", val, consumed)
+	}
+}
+
+func TestReadValueShortData(t *testing.T) {
+	data := []byte{0x01, 0x02} // only 2 bytes
+	val, consumed := readValue(data, 0, OidInt4, 4) // need 4 bytes
+	if val != nil || consumed != 0 {
+		t.Errorf("expected nil/0, got %v/%d", val, consumed)
+	}
+}
+
+// === Page tests ===
+
+func TestValidHeader(t *testing.T) {
+	tests := []struct {
+		name  string
+		h     *PageHeader
+		valid bool
+	}{
+		{
+			name:  "valid 8k page",
+			h:     &PageHeader{Lower: 24, Upper: 8000, PageSize: 8192, Version: 4},
+			valid: true,
+		},
+		{
+			name:  "valid 16k page",
+			h:     &PageHeader{Lower: 24, Upper: 16000, PageSize: 16384, Version: 4},
+			valid: true,
+		},
+		{
+			name:  "nil header",
+			h:     nil,
+			valid: false,
+		},
+		{
+			name:  "invalid page size",
+			h:     &PageHeader{Lower: 24, Upper: 8000, PageSize: 4096, Version: 4},
+			valid: false,
+		},
+		{
+			name:  "version too low",
+			h:     &PageHeader{Lower: 24, Upper: 8000, PageSize: 8192, Version: 0},
+			valid: false,
+		},
+		{
+			name:  "version too high",
+			h:     &PageHeader{Lower: 24, Upper: 8000, PageSize: 8192, Version: 11},
+			valid: false,
+		},
+		{
+			name:  "lower too small",
+			h:     &PageHeader{Lower: 10, Upper: 8000, PageSize: 8192, Version: 4},
+			valid: false,
+		},
+		{
+			name:  "upper > pagesize",
+			h:     &PageHeader{Lower: 24, Upper: 9000, PageSize: 8192, Version: 4},
+			valid: false,
+		},
+		{
+			name:  "lower > upper",
+			h:     &PageHeader{Lower: 8000, Upper: 100, PageSize: 8192, Version: 4},
+			valid: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validHeader(tt.h); got != tt.valid {
+				t.Errorf("validHeader() = %v, want %v", got, tt.valid)
+			}
+		})
+	}
+}
+
+func TestParseHeader(t *testing.T) {
+	// Create minimal page header
+	data := make([]byte, 24)
+	// pd_lower at offset 12 (2 bytes)
+	data[12] = 0x30 // 48
+	data[13] = 0x00
+	// pd_upper at offset 14 (2 bytes)
+	data[14] = 0x00 // 8000
+	data[15] = 0x1F
+	// pd_pagesize_version at offset 18 (2 bytes)
+	// pagesize=8192 (0x2000), version=4
+	data[18] = 0x04 // version
+	data[19] = 0x20 // pagesize high byte
+
+	h := parseHeader(data)
+	if h.Lower != 48 {
+		t.Errorf("Lower = %d, want 48", h.Lower)
+	}
+	if h.Upper != 7936 { // 0x1F00
+		t.Errorf("Upper = %d, want 7936", h.Upper)
+	}
+	if h.PageSize != 8192 {
+		t.Errorf("PageSize = %d, want 8192", h.PageSize)
+	}
+	if h.Version != 4 {
+		t.Errorf("Version = %d, want 4", h.Version)
+	}
+}
+
+func TestParseItems(t *testing.T) {
+	// Create page with 2 items
+	data := make([]byte, 48)
+	h := &PageHeader{Lower: 32} // header(24) + 2 items(8)
+
+	// Item 1 at offset 24: offset=8000, flags=1, length=100
+	// raw = offset | (flags << 15) | (length << 17)
+	// = 8000 | (1 << 15) | (100 << 17)
+	// = 8000 | 32768 | 13107200 = 13148000
+	raw1 := uint32(8000) | (uint32(1) << 15) | (uint32(100) << 17)
+	data[24] = byte(raw1)
+	data[25] = byte(raw1 >> 8)
+	data[26] = byte(raw1 >> 16)
+	data[27] = byte(raw1 >> 24)
+
+	// Item 2 at offset 28: offset=7900, flags=1, length=50
+	raw2 := uint32(7900) | (uint32(1) << 15) | (uint32(50) << 17)
+	data[28] = byte(raw2)
+	data[29] = byte(raw2 >> 8)
+	data[30] = byte(raw2 >> 16)
+	data[31] = byte(raw2 >> 24)
+
+	items := parseItems(data, h)
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+
+	if items[0].Offset != 8000 || items[0].Flags != 1 || items[0].Length != 100 {
+		t.Errorf("item[0] = %+v, want offset=8000, flags=1, length=100", items[0])
+	}
+	if items[1].Offset != 7900 || items[1].Flags != 1 || items[1].Length != 50 {
+		t.Errorf("item[1] = %+v, want offset=7900, flags=1, length=50", items[1])
+	}
+}
+
+func TestParsePageTooSmall(t *testing.T) {
+	data := make([]byte, 100) // < PageSize
+	entries := ParsePage(data)
+	if entries != nil {
+		t.Errorf("expected nil for small page, got %v", entries)
+	}
+}
+
+func TestParsePageInvalidHeader(t *testing.T) {
+	// Create page with invalid header (wrong page size)
+	data := make([]byte, PageSize)
+	data[18] = 0x04      // version 4
+	data[19] = 0x10      // pagesize 4096 (invalid)
+	entries := ParsePage(data)
+	if entries != nil {
+		t.Errorf("expected nil for invalid header, got %v", entries)
+	}
+}
