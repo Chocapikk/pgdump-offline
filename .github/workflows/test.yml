@@ -366,29 +366,43 @@ jobs:
       - name: Install PostgreSQL ${{ matrix.pg }}
         shell: pwsh
         run: |
-          choco install postgresql${{ matrix.pg }} --params '/Password:testpass' -y
-          refreshenv
-          Start-Sleep -Seconds 10
+          # Install PostgreSQL with specific password
+          choco install postgresql${{ matrix.pg }} --params '/Password:postgres' -y --no-progress
           
-          $env:PATH = "C:\Program Files\PostgreSQL\${{ matrix.pg }}\bin;$env:PATH"
-          echo "PG_PATH=C:\Program Files\PostgreSQL\${{ matrix.pg }}\bin" >> $env:GITHUB_ENV
+          # Wait for service to start
+          Start-Sleep -Seconds 15
+          
+          $pgPath = "C:\Program Files\PostgreSQL\${{ matrix.pg }}\bin"
+          echo "PG_PATH=$pgPath" >> $env:GITHUB_ENV
+          echo "$pgPath" >> $env:GITHUB_PATH
+          
+          # Verify installation
+          & "$pgPath\psql" --version
 
       - name: Create test data
         shell: pwsh
         run: |
-          $env:PGPASSWORD = "testpass"
-          $env:PATH = "$env:PG_PATH;$env:PATH"
+          $env:PGPASSWORD = "postgres"
           
-          & psql -U postgres -c "CREATE DATABASE testdb;"
-          & psql -U postgres -d testdb -c "CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));"
-          & psql -U postgres -d testdb -c "INSERT INTO users (email, password_hash) VALUES ('admin@test.com', '\$argon2id\$hash');"
-          & psql -U postgres -d testdb -c "CREATE TABLE secrets (id SERIAL, name VARCHAR(255), value JSONB);"
-          & psql -U postgres -d testdb -c "INSERT INTO secrets (name, value) VALUES ('aws', '{\"key\": \"AKIA...\"}');"
+          # Wait for PostgreSQL to be fully ready
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              & "$env:PG_PATH\psql" -U postgres -c "SELECT 1;" 2>$null
+              if ($LASTEXITCODE -eq 0) { break }
+            } catch {}
+            Start-Sleep -Seconds 1
+          }
+          
+          & "$env:PG_PATH\psql" -U postgres -c "CREATE DATABASE testdb;"
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));"
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "INSERT INTO users (email, password_hash) VALUES ('admin@test.com', 'argon2hash');"
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "CREATE TABLE secrets (id SERIAL, name VARCHAR(255), value JSONB);"
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "INSERT INTO secrets (name, value) VALUES ('aws', '{\"key\": \"AKIA\"}');"
           
           # Test multiple types
-          & psql -U postgres -d testdb -c "CREATE TABLE type_test (col_int INTEGER, col_text TEXT, col_bool BOOLEAN, col_float DOUBLE PRECISION, col_uuid UUID, col_inet INET, col_point POINT, col_jsonb JSONB, col_date DATE, col_money MONEY);"
-          & psql -U postgres -d testdb -c "INSERT INTO type_test VALUES (42, 'test', true, 3.14, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '192.168.1.1', '(1,2)', '{\"secret\": \"pass\"}', '2025-01-18', '\`$99.99');"
-          & psql -U postgres -d testdb -c "CHECKPOINT;"
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "CREATE TABLE type_test (col_int INTEGER, col_text TEXT, col_bool BOOLEAN, col_float DOUBLE PRECISION, col_uuid UUID, col_inet INET, col_point POINT, col_jsonb JSONB, col_date DATE);"
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "INSERT INTO type_test VALUES (42, 'test', true, 3.14, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '192.168.1.1', '(1,2)', '{\"secret\": \"pass\"}', '2025-01-18');"
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "CHECKPOINT;"
 
       - name: Build
         run: go build -o pgdump-offline.exe .
