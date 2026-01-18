@@ -144,11 +144,15 @@ jobs:
           echo "=== Tables in testdb via psql ==="
           docker exec pg psql -U postgres -d testdb -c "\dt"
           
+          echo "=== Get testdb OID ==="
+          TESTDB_OID=$(docker exec pg psql -U postgres -tAc "SELECT oid FROM pg_database WHERE datname='testdb'")
+          echo "testdb OID: $TESTDB_OID"
+          
           echo "=== Check pg_class file exists ==="
-          docker exec pg ls -la /var/lib/postgresql/data/base/16384/ | head -20
+          docker exec pg ls -la /var/lib/postgresql/data/base/$TESTDB_OID/ | head -20
           
           echo "=== Parse pg_class ==="
-          docker exec pg pgdump-offline -f /var/lib/postgresql/data/base/16384/1259 2>&1 | head -50
+          docker exec pg pgdump-offline -f /var/lib/postgresql/data/base/$TESTDB_OID/1259 2>&1 | head -50
 
       - name: Test full dump
         run: |
