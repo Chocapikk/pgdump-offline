@@ -576,14 +576,19 @@ jobs:
           docker stop pg
           sleep 3
           
+          # Fix permissions - Docker creates files as postgres user
+          sudo chmod -R 755 /tmp/pgdata
+          sudo chown -R $(id -u):$(id -g) /tmp/pgdata
+          
           # Verify files exist on host
           echo "=== Checking PostgreSQL files on host ==="
           ls -la /tmp/pgdata/
-          ls -la /tmp/pgdata/global/ || echo "global dir not found"
-          ls -la /tmp/pgdata/base/ || echo "base dir not found"
+          ls -la /tmp/pgdata/global/
+          ls -la /tmp/pgdata/base/
           
           # Find pg_database file
-          find /tmp/pgdata -name "1262" 2>/dev/null || echo "pg_database file not found"
+          echo "=== pg_database location ==="
+          find /tmp/pgdata -name "1262" 2>/dev/null
 
       - name: Start vulnerable web app
         run: |
