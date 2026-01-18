@@ -10,3 +10,4 @@ pgdump-offline-linux
 
 # Test data
 /tmp/
+coverage.out
