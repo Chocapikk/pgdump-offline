@@ -136,6 +136,10 @@ jobs:
   # macOS integration test
   integration-macos:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['14', '15', '16', '17']
     steps:
       - uses: actions/checkout@v4
 
@@ -143,35 +147,30 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Install PostgreSQL
+      - name: Install PostgreSQL ${{ matrix.pg }}
         run: |
-          brew install postgresql@16
-          brew services start postgresql@16
+          brew install postgresql@${{ matrix.pg }}
+          brew services start postgresql@${{ matrix.pg }}
           sleep 5
           
           # Find the right path
-          if [ -d /opt/homebrew/opt/postgresql@16 ]; then
-            PG_PATH=/opt/homebrew/opt/postgresql@16/bin
+          if [ -d /opt/homebrew/opt/postgresql@${{ matrix.pg }} ]; then
+            PG_PATH=/opt/homebrew/opt/postgresql@${{ matrix.pg }}/bin
           else
-            PG_PATH=/usr/local/opt/postgresql@16/bin
+            PG_PATH=/usr/local/opt/postgresql@${{ matrix.pg }}/bin
           fi
+          echo "PG_PATH=$PG_PATH" >> $GITHUB_ENV
           
           # Create test database
           $PG_PATH/createdb -h localhost testdb
 
       - name: Create test data
         run: |
-          if [ -f /opt/homebrew/opt/postgresql@16/bin/psql ]; then
-            PSQL=/opt/homebrew/opt/postgresql@16/bin/psql
-          else
-            PSQL=/usr/local/opt/postgresql@16/bin/psql
-          fi
-          
-          $PSQL -h localhost -c "CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));" testdb
-          $PSQL -h localhost -c "INSERT INTO users (email, password_hash) VALUES ('admin@test.com', '\$argon2id\$hash');" testdb
-          $PSQL -h localhost -c "CREATE TABLE secrets (id SERIAL, name VARCHAR(255), value JSONB);" testdb
-          $PSQL -h localhost -c "INSERT INTO secrets (name, value) VALUES ('aws', '{\"key\": \"AKIA...\"}');" testdb
-          $PSQL -h localhost -c "CHECKPOINT;" testdb
+          $PG_PATH/psql -h localhost -c "CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));" testdb
+          $PG_PATH/psql -h localhost -c "INSERT INTO users (email, password_hash) VALUES ('admin@test.com', '\$argon2id\$hash');" testdb
+          $PG_PATH/psql -h localhost -c "CREATE TABLE secrets (id SERIAL, name VARCHAR(255), value JSONB);" testdb
+          $PG_PATH/psql -h localhost -c "INSERT INTO secrets (name, value) VALUES ('aws', '{\"key\": \"AKIA...\"}');" testdb
+          $PG_PATH/psql -h localhost -c "CHECKPOINT;" testdb
 
       - name: Build
         run: go build -o pgdump-offline .
@@ -184,12 +183,16 @@ jobs:
           echo "=== Testing -list-db ==="
           ./pgdump-offline -list-db
           
-          echo "=== Testing auto-detect dump ==="
+          echo "=== Testing dump ==="
           ./pgdump-offline -db testdb -t users | jq .
 
   # Windows integration test  
   integration-windows:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['14', '15', '16', '17']
     steps:
       - uses: actions/checkout@v4
 
@@ -197,24 +200,21 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Install PostgreSQL
+      - name: Install PostgreSQL ${{ matrix.pg }}
         shell: pwsh
         run: |
-          choco install postgresql16 --params '/Password:testpass' -y
+          choco install postgresql${{ matrix.pg }} --params '/Password:testpass' -y
           refreshenv
-          
-          # Wait for service
           Start-Sleep -Seconds 10
           
-          # Add to PATH
-          $env:PATH = "C:\Program Files\PostgreSQL\16\bin;$env:PATH"
-          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, "Process")
+          $env:PATH = "C:\Program Files\PostgreSQL\${{ matrix.pg }}\bin;$env:PATH"
+          echo "PG_PATH=C:\Program Files\PostgreSQL\${{ matrix.pg }}\bin" >> $env:GITHUB_ENV
 
       - name: Create test data
         shell: pwsh
         run: |
           $env:PGPASSWORD = "testpass"
-          $env:PATH = "C:\Program Files\PostgreSQL\16\bin;$env:PATH"
+          $env:PATH = "$env:PG_PATH;$env:PATH"
           
           & psql -U postgres -c "CREATE DATABASE testdb;"
           & psql -U postgres -d testdb -c "CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));"
