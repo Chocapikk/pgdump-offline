@@ -9,183 +9,317 @@ import (
 // Example paths: "global/1260", "base/16384/1259", "PG_VERSION"
 type RemoteReader func(path string) ([]byte, error)
 
-// RemoteOptions configures what to extract
-type RemoteOptions struct {
-	Credentials bool     // Extract password hashes from pg_authid
-	Databases   bool     // Dump all databases
-	Tables      []string // Specific tables to dump (empty = all)
-	ControlFile bool     // Parse pg_control
-	ExcludeDBs  []string // Database names to skip
-}
-
-// DefaultRemoteOptions returns options that extract everything
-func DefaultRemoteOptions() *RemoteOptions {
-	return &RemoteOptions{
-		Credentials: true,
-		Databases:   true,
-		ControlFile: true,
-		ExcludeDBs:  []string{"template0", "template1"},
+// RemoteClient provides a high-level interface to explore PostgreSQL data remotely
+type RemoteClient struct {
+	reader  RemoteReader
+	version int
+	cache   struct {
+		databases []DatabaseInfo
+		tables    map[uint32]map[uint32]TableInfo // db OID -> filenode -> table
+		columns   map[uint32]map[uint32][]AttrInfo // db OID -> relid -> columns
 	}
 }
 
-// CredentialsOnly returns options for extracting only credentials
-func CredentialsOnly() *RemoteOptions {
-	return &RemoteOptions{Credentials: true}
-}
+// NewRemoteClient creates a new remote client with the given reader
+func NewRemoteClient(reader RemoteReader) *RemoteClient {
+	c := &RemoteClient{reader: reader}
+	c.cache.tables = make(map[uint32]map[uint32]TableInfo)
+	c.cache.columns = make(map[uint32]map[uint32][]AttrInfo)
 
-// RemoteResult contains extracted data
-type RemoteResult struct {
-	Version     string        `json:"version,omitempty"`
-	Control     *ControlFile  `json:"control,omitempty"`
-	Credentials []Credential  `json:"credentials,omitempty"`
-	Databases   []DBResult    `json:"databases,omitempty"`
-}
-
-// Credential represents a PostgreSQL user credential
-type Credential struct {
-	Username string `json:"username"`
-	Password string `json:"password,omitempty"`
-	Super    bool   `json:"super,omitempty"`
-	Login    bool   `json:"login,omitempty"`
-}
-
-// DBResult contains dump results for a database
-type DBResult struct {
-	Name   string        `json:"name"`
-	OID    uint32        `json:"oid"`
-	Tables []TableResult `json:"tables,omitempty"`
-}
-
-// TableResult contains dump results for a table
-type TableResult struct {
-	Name     string           `json:"name"`
-	OID      uint32           `json:"oid"`
-	RowCount int              `json:"row_count"`
-	Rows     []map[string]any `json:"rows,omitempty"`
-}
-
-// RemoteDump extracts data from a PostgreSQL data directory
-func RemoteDump(reader RemoteReader, opts *RemoteOptions) (*RemoteResult, error) {
-	if opts == nil {
-		opts = DefaultRemoteOptions()
-	}
-
-	result := &RemoteResult{}
-
-	// Read PG_VERSION
+	// Detect version
 	if data, err := reader("PG_VERSION"); err == nil {
-		result.Version = strings.TrimSpace(string(data))
+		v := strings.TrimSpace(string(data))
+		fmt.Sscanf(v, "%d", &c.version)
 	}
 
-	// Parse pg_control
-	if opts.ControlFile {
-		if data, err := reader("global/pg_control"); err == nil {
-			if ctrl, err := ParseControlFile(data); err == nil {
-				result.Control = ctrl
-			}
+	return c
+}
+
+// Version returns the PostgreSQL version string
+func (c *RemoteClient) Version() string {
+	if data, err := c.reader("PG_VERSION"); err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	return ""
+}
+
+// Control returns the pg_control file info
+func (c *RemoteClient) Control() *ControlFile {
+	if data, err := c.reader("global/pg_control"); err == nil {
+		if ctrl, err := ParseControlFile(data); err == nil {
+			return ctrl
 		}
 	}
+	return nil
+}
 
-	// Extract credentials
-	if opts.Credentials {
-		if data, err := reader(fmt.Sprintf("global/%d", PGAuthID)); err == nil {
-			for _, auth := range ParsePGAuthID(data) {
-				result.Credentials = append(result.Credentials, Credential{
-					Username: auth.RoleName,
-					Password: auth.Password,
-					Super:    auth.RolSuper,
-					Login:    auth.RolLogin,
-				})
-			}
+// Credentials returns all user credentials (pg_authid)
+func (c *RemoteClient) Credentials() []AuthInfo {
+	if data, err := c.reader(fmt.Sprintf("global/%d", PGAuthID)); err == nil {
+		return ParsePGAuthID(data)
+	}
+	return nil
+}
+
+// Databases returns all databases
+func (c *RemoteClient) Databases() []DatabaseInfo {
+	if c.cache.databases != nil {
+		return c.cache.databases
+	}
+	if data, err := c.reader(fmt.Sprintf("global/%d", PGDatabase)); err == nil {
+		c.cache.databases = ParsePGDatabase(data)
+	}
+	return c.cache.databases
+}
+
+// Database returns a specific database by name
+func (c *RemoteClient) Database(name string) *DatabaseInfo {
+	for _, db := range c.Databases() {
+		if strings.EqualFold(db.Name, name) {
+			return &db
 		}
 	}
+	return nil
+}
 
-	// Dump databases
-	if opts.Databases {
-		dbData, err := reader(fmt.Sprintf("global/%d", PGDatabase))
-		if err != nil {
-			return result, nil
+// loadCatalog loads pg_class and pg_attribute for a database
+func (c *RemoteClient) loadCatalog(dbOID uint32) {
+	if _, ok := c.cache.tables[dbOID]; ok {
+		return
+	}
+
+	base := fmt.Sprintf("base/%d", dbOID)
+
+	// Load tables
+	classData, err := c.reader(fmt.Sprintf("%s/%d", base, PGClass))
+	if err != nil {
+		c.cache.tables[dbOID] = make(map[uint32]TableInfo)
+		c.cache.columns[dbOID] = make(map[uint32][]AttrInfo)
+		return
+	}
+	c.cache.tables[dbOID] = ParsePGClass(classData)
+
+	// Load columns
+	attrData, err := c.reader(fmt.Sprintf("%s/%d", base, PGAttribute))
+	if err != nil {
+		c.cache.columns[dbOID] = make(map[uint32][]AttrInfo)
+		return
+	}
+	c.cache.columns[dbOID] = ParsePGAttribute(attrData, c.version)
+}
+
+// Tables returns all tables in a database
+func (c *RemoteClient) Tables(dbOID uint32) []TableInfo {
+	c.loadCatalog(dbOID)
+	var tables []TableInfo
+	for _, t := range c.cache.tables[dbOID] {
+		tables = append(tables, t)
+	}
+	return tables
+}
+
+// TablesByName returns all tables in a database by name
+func (c *RemoteClient) TablesByName(dbName string) []TableInfo {
+	db := c.Database(dbName)
+	if db == nil {
+		return nil
+	}
+	return c.Tables(db.OID)
+}
+
+// Table returns a specific table by name
+func (c *RemoteClient) Table(dbOID uint32, tableName string) *TableInfo {
+	c.loadCatalog(dbOID)
+	for _, t := range c.cache.tables[dbOID] {
+		if strings.EqualFold(t.Name, tableName) {
+			return &t
 		}
+	}
+	return nil
+}
 
-		for _, db := range ParsePGDatabase(dbData) {
-			if shouldSkipDB(db.Name, opts.ExcludeDBs) {
-				continue
-			}
+// Columns returns all columns for a table
+func (c *RemoteClient) Columns(dbOID, tableOID uint32) []AttrInfo {
+	c.loadCatalog(dbOID)
+	return c.cache.columns[dbOID][tableOID]
+}
 
-			dbResult := DBResult{Name: db.Name, OID: db.OID}
-			base := fmt.Sprintf("base/%d", db.OID)
+// ColumnNames returns just column names for a table
+func (c *RemoteClient) ColumnNames(dbOID, tableOID uint32) []string {
+	var names []string
+	for _, col := range c.Columns(dbOID, tableOID) {
+		if col.Num > 0 { // Skip system columns
+			names = append(names, col.Name)
+		}
+	}
+	return names
+}
 
-			classData, _ := reader(fmt.Sprintf("%s/%d", base, PGClass))
-			attrData, _ := reader(fmt.Sprintf("%s/%d", base, PGAttribute))
+// QueryOptions configures data extraction
+type QueryOptions struct {
+	Columns []string // Specific columns to extract (empty = all)
+	Limit   int      // Max rows (0 = unlimited)
+}
 
-			fileReader := func(fn uint32) ([]byte, error) {
-				return reader(fmt.Sprintf("%s/%d", base, fn))
-			}
+// Query extracts data from a table
+func (c *RemoteClient) Query(dbOID uint32, table *TableInfo, opts *QueryOptions) []map[string]any {
+	if table == nil || table.Filenode == 0 {
+		return nil
+	}
 
-			if dump, _ := DumpDatabaseFromFiles(classData, attrData, fileReader, nil); dump != nil {
-				for _, t := range dump.Tables {
-					if len(opts.Tables) > 0 && !containsTable(opts.Tables, t.Name) {
-						continue
-					}
-					dbResult.Tables = append(dbResult.Tables, TableResult{
-						Name:     t.Name,
-						OID:      t.OID,
-						RowCount: len(t.Rows),
-						Rows:     t.Rows,
-					})
+	base := fmt.Sprintf("base/%d", dbOID)
+	data, err := c.reader(fmt.Sprintf("%s/%d", base, table.Filenode))
+	if err != nil {
+		return nil
+	}
+
+	attrs := c.Columns(dbOID, table.OID)
+	cols := make([]Column, len(attrs))
+	for i, a := range attrs {
+		cols[i] = Column{Name: a.Name, TypID: a.TypID, Len: a.Len, Num: a.Num, Align: a.Align}
+	}
+	rows := ReadRows(data, cols, true)
+
+	// Filter columns if specified
+	if opts != nil && len(opts.Columns) > 0 {
+		filtered := make([]map[string]any, 0, len(rows))
+		for _, row := range rows {
+			newRow := make(map[string]any)
+			for _, col := range opts.Columns {
+				if val, ok := row[col]; ok {
+					newRow[col] = val
 				}
 			}
-
-			result.Databases = append(result.Databases, dbResult)
+			filtered = append(filtered, newRow)
 		}
+		rows = filtered
 	}
 
-	return result, nil
+	// Apply limit
+	if opts != nil && opts.Limit > 0 && len(rows) > opts.Limit {
+		rows = rows[:opts.Limit]
+	}
+
+	return rows
 }
 
-// RemoteDumpLight returns a lightweight summary (no row data)
-func RemoteDumpLight(reader RemoteReader) *RemoteSummary {
-	opts := DefaultRemoteOptions()
-	result, _ := RemoteDump(reader, opts)
-
-	summary := &RemoteSummary{Databases: make(map[string][]string)}
-
-	for _, cred := range result.Credentials {
-		if cred.Password != "" {
-			summary.Credentials = append(summary.Credentials, cred.Username+":"+cred.Password)
-		}
+// QueryByName extracts data from a table by database and table name
+func (c *RemoteClient) QueryByName(dbName, tableName string, opts *QueryOptions) []map[string]any {
+	db := c.Database(dbName)
+	if db == nil {
+		return nil
 	}
-
-	for _, db := range result.Databases {
-		for _, t := range db.Tables {
-			summary.Databases[db.Name] = append(summary.Databases[db.Name],
-				fmt.Sprintf("%s (%d rows)", t.Name, t.RowCount))
-		}
-	}
-
-	return summary
+	table := c.Table(db.OID, tableName)
+	return c.Query(db.OID, table, opts)
 }
 
-// RemoteSummary is a lightweight result with just counts
-type RemoteSummary struct {
+// DumpTable dumps a complete table with metadata
+func (c *RemoteClient) DumpTable(dbOID uint32, table *TableInfo) *TableDump {
+	if table == nil {
+		return nil
+	}
+	rows := c.Query(dbOID, table, nil)
+
+	// Convert column names to ColumnInfo
+	var cols []ColumnInfo
+	for _, a := range c.Columns(dbOID, table.OID) {
+		if a.Num > 0 {
+			cols = append(cols, ColumnInfo{Name: a.Name, TypID: a.TypID, Type: TypeName(a.TypID)})
+		}
+	}
+
+	return &TableDump{
+		OID:      table.OID,
+		Name:     table.Name,
+		Filenode: table.Filenode,
+		Kind:     table.Kind,
+		Columns:  cols,
+		Rows:     rows,
+		RowCount: len(rows),
+	}
+}
+
+// DumpDatabase dumps all user tables in a database
+func (c *RemoteClient) DumpDatabase(dbOID uint32) *DatabaseDump {
+	db := c.findDB(dbOID)
+	if db == nil {
+		return nil
+	}
+
+	dump := &DatabaseDump{OID: dbOID, Name: db.Name}
+	for _, t := range c.Tables(dbOID) {
+		if strings.HasPrefix(t.Name, "pg_") || strings.HasPrefix(t.Name, "sql_") {
+			continue
+		}
+		if td := c.DumpTable(dbOID, &t); td != nil && len(td.Rows) > 0 {
+			dump.Tables = append(dump.Tables, *td)
+		}
+	}
+	return dump
+}
+
+// DumpDatabaseByName dumps a database by name
+func (c *RemoteClient) DumpDatabaseByName(name string) *DatabaseDump {
+	db := c.Database(name)
+	if db == nil {
+		return nil
+	}
+	return c.DumpDatabase(db.OID)
+}
+
+// DumpAll dumps everything
+func (c *RemoteClient) DumpAll() *DumpResult {
+	result := &DumpResult{}
+	for _, db := range c.Databases() {
+		if strings.HasPrefix(db.Name, "template") {
+			continue
+		}
+		if dump := c.DumpDatabase(db.OID); dump != nil {
+			result.Databases = append(result.Databases, *dump)
+		}
+	}
+	return result
+}
+
+func (c *RemoteClient) findDB(oid uint32) *DatabaseInfo {
+	for _, db := range c.Databases() {
+		if db.OID == oid {
+			return &db
+		}
+	}
+	return nil
+}
+
+// Summary is a lightweight overview
+type Summary struct {
+	Version     string              `json:"version,omitempty"`
 	Credentials []string            `json:"credentials,omitempty"`
 	Databases   map[string][]string `json:"databases,omitempty"`
 }
 
-func shouldSkipDB(name string, exclude []string) bool {
-	for _, ex := range exclude {
-		if strings.EqualFold(name, ex) || strings.HasPrefix(name, ex) {
-			return true
-		}
+// Summary returns a lightweight overview of the PostgreSQL instance
+func (c *RemoteClient) Summary() *Summary {
+	s := &Summary{
+		Version:   c.Version(),
+		Databases: make(map[string][]string),
 	}
-	return false
-}
 
-func containsTable(tables []string, name string) bool {
-	for _, t := range tables {
-		if strings.EqualFold(t, name) {
-			return true
+	for _, cred := range c.Credentials() {
+		if cred.Password != "" {
+			s.Credentials = append(s.Credentials, cred.RoleName+":"+cred.Password)
 		}
 	}
-	return false
+
+	for _, db := range c.Databases() {
+		if strings.HasPrefix(db.Name, "template") {
+			continue
+		}
+		for _, t := range c.Tables(db.OID) {
+			if !strings.HasPrefix(t.Name, "pg_") && !strings.HasPrefix(t.Name, "sql_") {
+				s.Databases[db.Name] = append(s.Databases[db.Name], t.Name)
+			}
+		}
+	}
+
+	return s
 }

