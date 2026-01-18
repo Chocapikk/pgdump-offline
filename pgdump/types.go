@@ -358,6 +358,9 @@ func decodeRange(data []byte, oid int) string {
 		elemOid = OidTimestampTZ
 	case OidDateRange:
 		elemOid = OidDate
+	default:
+		// Unknown range type, return raw representation
+		return fmt.Sprintf("range:%x", data)
 	}
 
 	if !lbInf {
@@ -367,10 +370,13 @@ func decodeRange(data []byte, oid int) string {
 		}
 		lbLen := int(i32(data, offset))
 		offset += 4
-		if offset+lbLen > len(data) {
+		// Sanity check: length must be positive and within bounds
+		if lbLen < 0 || lbLen > len(data)-offset {
 			return "[?,?]"
 		}
-		lb = fmt.Sprintf("%v", DecodeType(data[offset:offset+lbLen], elemOid))
+		if lbLen > 0 {
+			lb = fmt.Sprintf("%v", DecodeType(data[offset:offset+lbLen], elemOid))
+		}
 		offset += lbLen
 	}
 
@@ -380,10 +386,13 @@ func decodeRange(data []byte, oid int) string {
 		}
 		ubLen := int(i32(data, offset))
 		offset += 4
-		if offset+ubLen > len(data) {
+		// Sanity check: length must be positive and within bounds
+		if ubLen < 0 || ubLen > len(data)-offset {
 			return "[?,?]"
 		}
-		ub = fmt.Sprintf("%v", DecodeType(data[offset:offset+ubLen], elemOid))
+		if ubLen > 0 {
+			ub = fmt.Sprintf("%v", DecodeType(data[offset:offset+ubLen], elemOid))
+		}
 	}
 
 	// Format

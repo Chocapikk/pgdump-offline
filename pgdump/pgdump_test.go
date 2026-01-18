@@ -670,6 +670,33 @@ func TestDecodeRangeInfinite(t *testing.T) {
 	}
 }
 
+func TestDecodeRangeMalformed(t *testing.T) {
+	// Test with malformed data that could cause panic
+	tests := []struct {
+		name string
+		data []byte
+		oid  int
+	}{
+		{"truncated", []byte{0x02, 0xFF, 0xFF}, OidInt4Range},
+		{"negative length", []byte{0x02, 0xFF, 0xFF, 0xFF, 0xFF}, OidInt4Range},
+		{"huge length", []byte{0x02, 0x00, 0x00, 0x00, 0x7F}, OidInt4Range},
+		{"empty data", []byte{}, OidInt4Range},
+		{"just flags", []byte{0x02}, OidInt4Range},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("decodeRange panicked: %v", r)
+				}
+			}()
+			_ = DecodeType(tt.data, tt.oid)
+		})
+	}
+}
+
 func TestDecodeText(t *testing.T) {
 	data := []byte("hello world")
 	got := DecodeType(data, OidText)
