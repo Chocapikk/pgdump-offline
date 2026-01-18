@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Chocapikk/pgread/pgdump"
@@ -22,6 +23,9 @@ func main() {
 		showDeleted, showWAL                       bool
 		showControl, verifyChecksums               bool
 		parseIndex, showDropped                    bool
+		showSequences, showRelmap, blockRange      string
+		binaryDump, skipOldValues, toastVerbose    bool
+		segmentNumber, segmentSize                 int
 	)
 
 	flag.StringVar(&dataDir, "d", "", "PostgreSQL data directory (auto-detected if not set)")
@@ -42,6 +46,14 @@ func main() {
 	flag.BoolVar(&verifyChecksums, "checksum", false, "Verify page checksums")
 	flag.BoolVar(&parseIndex, "index", false, "Parse index file (use with -f)")
 	flag.BoolVar(&showDropped, "dropped", false, "Show dropped columns")
+	flag.StringVar(&showSequences, "sequences", "", "Show sequences ('all' or database name)")
+	flag.StringVar(&showRelmap, "relmap", "", "Show pg_filenode.map ('global', 'all', or db OID)")
+	flag.StringVar(&blockRange, "R", "", "Block range to read (e.g., '0:10', '5:', ':20', '5')")
+	flag.BoolVar(&binaryDump, "b", false, "Binary block dump (hex output)")
+	flag.BoolVar(&skipOldValues, "o", false, "Skip old/dead tuple values")
+	flag.BoolVar(&toastVerbose, "toast-verbose", false, "Verbose TOAST information")
+	flag.IntVar(&segmentNumber, "n", 0, "Force segment number (for multi-segment files)")
+	flag.IntVar(&segmentSize, "s", 0, "Force segment size in bytes (default: 1GB)")
 	flag.BoolVar(&verbose, "v", false, "Verbose output")
 	flag.BoolVar(&debug, "debug", false, "Debug tuple decoding")
 	flag.BoolVar(&showVersion, "version", false, "Show version")
@@ -72,8 +84,23 @@ func main() {
 	}
 
 	if singleFile != "" {
-		if parseIndex {
+		// Build segment options if specified
+		var segOpts *pgdump.SegmentOptions
+		if segmentNumber > 0 || segmentSize > 0 {
+			segOpts = &pgdump.SegmentOptions{
+				SegmentNumber: segmentNumber,
+				SegmentSize:   segmentSize,
+			}
+		}
+		
+		if binaryDump {
+			parseBinaryDump(singleFile, blockRange)
+		} else if parseIndex {
 			parseIndexFile(singleFile)
+		} else if toastVerbose {
+			parseToastVerbose(singleFile)
+		} else if blockRange != "" {
+			parseBlockRangeWithSegment(singleFile, blockRange, segOpts)
 		} else {
 			parseSingle(singleFile)
 		}
@@ -162,6 +189,63 @@ func main() {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			enc.Encode(results)
+		}
+		return
+	}
+
+	// Show sequences
+	if showSequences != "" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if showSequences == "all" {
+			results, err := pgdump.ScanAllSequences(dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			enc.Encode(results)
+		} else {
+			results, err := pgdump.FindSequences(dataDir, showSequences)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			enc.Encode(results)
+		}
+		return
+	}
+
+	// Show relmap
+	if showRelmap != "" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if showRelmap == "global" {
+			rm, err := pgdump.ReadGlobalRelMap(dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			enc.Encode(rm)
+		} else if showRelmap == "all" {
+			info, err := pgdump.ReadAllRelMaps(dataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			enc.Encode(info)
+		} else {
+			// Assume it's a database OID
+			oid, err := strconv.ParseUint(showRelmap, 10, 32)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Invalid relmap option: %s (use 'global', 'all', or database OID)\n", showRelmap)
+				os.Exit(1)
+			}
+			rm, err := pgdump.ReadDatabaseRelMap(dataDir, uint32(oid))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			enc.Encode(rm)
 		}
 		return
 	}
@@ -289,6 +373,85 @@ func main() {
 	}
 }
 
+func parseToastVerbose(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// Try to detect TOAST table OID from path
+	var toastOID uint32
+	base := filepath.Base(path)
+	if oid, err := strconv.ParseUint(base, 10, 32); err == nil {
+		toastOID = uint32(oid)
+	}
+	
+	info := pgdump.GetTOASTVerboseInfo(toastOID, data)
+	if info == nil {
+		fmt.Fprintln(os.Stderr, "No TOAST data found or not a TOAST table")
+		os.Exit(1)
+	}
+	
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(info)
+}
+
+func parseBlockRangeWithSegment(path, rangeStr string, segOpts *pgdump.SegmentOptions) {
+	br, err := pgdump.ParseBlockRange(rangeStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing block range: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// If segment options provided, show segment info
+	if segOpts != nil {
+		segInfo, err := pgdump.GetSegmentInfo(path, segOpts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting segment info: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "[*] Segment %d: %d blocks, global offset 0x%X\n", 
+			segInfo.SegmentNumber, segInfo.TotalBlocks, segInfo.GlobalOffset)
+	}
+	
+	blocks, err := pgdump.DumpBlockRange(path, br)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(blocks)
+}
+
+func parseBinaryDump(path, rangeStr string) {
+	var br *pgdump.BlockRange
+	var err error
+	
+	if rangeStr != "" {
+		br, err = pgdump.ParseBlockRange(rangeStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing block range: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	
+	dumps, err := pgdump.DumpBinaryRange(path, br)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// Output as text hex dump (like xxd/hexdump)
+	for _, d := range dumps {
+		fmt.Printf("Block %d (offset 0x%08X):\n", d.BlockNumber, d.Offset)
+		fmt.Println(d.HexDump)
+	}
+}
+
 func parseIndexFile(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -366,7 +529,16 @@ Low-Level / Forensics:
   pgread -control                            Show pg_control file (version, state, LSN)
   pgread -checksum                           Verify page checksums (detect corruption)
   pgread -dropped                            Show dropped columns (recoverable data)
-  pgread -dropped -db mydb                   Dropped columns for specific database
+  pgread -sequences all                      Show all sequences
+  pgread -sequences mydb                     Show sequences for specific database
+  pgread -relmap global                      Show global pg_filenode.map
+  pgread -relmap all                         Show all relmap files
+  pgread -f /path/to/file -R 0:10            Read specific block range
+  pgread -f /path/to/file -b                 Binary block dump (hex output)
+  pgread -f /path/to/file -b -R 0:5          Binary dump of block range
+  pgread -f /path/to/toast -toast-verbose    Verbose TOAST table info
+  pgread -f /path/to/file -n 2 -R 0:10       Read from segment 2
+  pgread -f /path/to/file -s 134217728       Custom segment size (128MB)
   pgread -f /path/to/index -index            Parse index file (BTree/GIN/GiST/Hash)
 
 Fixed OIDs:

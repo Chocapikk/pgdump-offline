@@ -51,7 +51,9 @@ pgread -detect                        # Show detected PostgreSQL paths
 pgread -control                       # pg_control file (version, state, LSN)
 pgread -checksum                      # Verify page checksums (corruption)
 pgread -dropped                       # Show dropped columns (recoverable)
-pgread -dropped -db mydb              # Dropped columns for specific DB
+pgread -sequences all                 # List all sequences with values
+pgread -relmap global                 # Show pg_filenode.map (OID→filenode)
+pgread -f /path/to/file -R 0:10       # Read specific block range
 pgread -f /path/to/index -index       # Parse index file (BTree/GIN/GiST/Hash)
 ```
 
@@ -185,6 +187,103 @@ $ pgread -dropped
 ```
 
 Recover data from columns that were `ALTER TABLE DROP COLUMN`!
+
+### Sequence Parsing
+
+```bash
+$ pgread -sequences mydb
+[
+  {
+    "name": "users_id_seq",
+    "oid": 16396,
+    "filenode": 16396,
+    "last_value": 42,
+    "start_value": 1,
+    "increment_by": 1,
+    "max_value": 9223372036854775807,
+    "min_value": 1,
+    "is_cycled": false,
+    "is_called": true
+  }
+]
+```
+
+### pg_filenode.map Parsing
+
+```bash
+$ pgread -relmap global
+{
+  "magic": 5842711,
+  "num_mappings": 50,
+  "mappings": [
+    {"oid": 1262, "filenode": 1262},
+    {"oid": 1260, "filenode": 1260},
+    ...
+  ]
+}
+```
+
+Maps system catalog OIDs to their physical filenodes.
+
+### Block Range Selection
+
+```bash
+$ pgread -f /path/to/heap -R 0:5
+[
+  {
+    "block_number": 0,
+    "lsn": "0/19921E0",
+    "checksum": 0,
+    "lower": 212,
+    "upper": 7744,
+    "page_size": 8192,
+    "item_count": 47,
+    "free_space": 7532
+  },
+  ...
+]
+```
+
+Read specific blocks: `0:10` (blocks 0-10), `5:` (from 5), `:20` (up to 20), `5` (block 5 only).
+
+### Binary Block Dump
+
+```bash
+$ pgread -f /path/to/heap -b -R 0
+Block 0 (offset 0x00000000):
+00000000  00 00 00 00 40 2e 4f 01  00 00 01 00 30 00 20 1d  |....@.O.....0. .|
+00000010  00 20 04 20 00 00 00 00  05 00 01 00 06 00 01 00  |. . ............|
+...
+```
+
+Raw hex dump like `xxd` or `hexdump -C`. Useful for low-level forensics.
+
+### Multi-Segment Files
+
+PostgreSQL splits large tables into 1GB segments. pgread handles this:
+
+```bash
+# Read from specific segment
+$ pgread -f /path/to/16384.2 -n 2 -R 0:10
+
+# Custom segment size (e.g., 128MB for some configs)
+$ pgread -f /path/to/file -s 134217728 -R 0:100
+```
+
+### TOAST Verbose
+
+```bash
+$ pgread -f /path/to/toast_table -toast-verbose
+{
+  "toast_rel_id": 16385,
+  "total_chunks": 150,
+  "unique_values": 42,
+  "total_size": 1048576,
+  "average_chunk_size": 6990.5,
+  "max_chunks_per_value": 12,
+  "chunk_distribution": {"1": 20, "2": 15, "5": 5, "12": 2}
+}
+```
 
 ### SQL/CSV Export
 

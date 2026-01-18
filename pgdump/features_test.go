@@ -105,14 +105,14 @@ func TestReassembleTOAST(t *testing.T) {
 		{ChunkID: 2, ChunkSeq: 0, Data: []byte("other")},
 	}
 
-	// Reassemble value 1
-	result := ReassembleTOAST(chunks, 1, false, 11)
+	// Reassemble value 1 (uncompressed)
+	result := ReassembleTOAST(chunks, 1, nil)
 	if string(result) != "hello world" {
 		t.Errorf("ReassembleTOAST = %q, want 'hello world'", string(result))
 	}
 
 	// Non-existent value
-	result = ReassembleTOAST(chunks, 99, false, 0)
+	result = ReassembleTOAST(chunks, 99, nil)
 	if result != nil {
 		t.Error("Expected nil for non-existent value")
 	}
