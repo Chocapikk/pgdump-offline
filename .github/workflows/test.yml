@@ -328,10 +328,8 @@ jobs:
           $PG_PATH/psql -h localhost -c "INSERT INTO type_test VALUES (42, 'test', true, 3.14, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '192.168.1.1', '(1,2)', '{\"secret\": \"pass\"}', '2025-01-18');" testdb
           
           # Verify data is in database
+          echo "=== Data in PostgreSQL ==="
           $PG_PATH/psql -h localhost -c "SELECT * FROM type_test;" testdb
-          
-          # Force checkpoint and use pg_ctl for clean shutdown (flushes all data)
-          $PG_PATH/psql -h localhost -c "CHECKPOINT;" testdb
           
           # Find data directory
           if [ -d /opt/homebrew/var/postgresql@${{ matrix.pg }} ]; then
@@ -339,40 +337,43 @@ jobs:
           else
             PGDATA=/usr/local/var/postgresql@${{ matrix.pg }}
           fi
-          echo "PGDATA=$PGDATA"
+          echo "PGDATA=$PGDATA" >> $GITHUB_ENV
           
-          # Use pg_ctl for proper shutdown (ensures WAL is flushed)
+          # Force checkpoint then STOP PostgreSQL completely (this flushes everything to disk)
+          $PG_PATH/psql -h localhost -c "CHECKPOINT;" testdb
           $PG_PATH/pg_ctl stop -D "$PGDATA" -m fast -w
-          sleep 2
-          $PG_PATH/pg_ctl start -D "$PGDATA" -w -l "$PGDATA/server.log"
-          sleep 3
           
-          # Verify PostgreSQL is back up
-          $PG_PATH/psql -h localhost -c "SELECT 1;" testdb
+          echo "PostgreSQL stopped - data should be on disk now"
+          ls -la "$PGDATA/base/"
 
       - name: Build
         run: go build -o pgdump-offline .
 
-      - name: Test auto-detection
+      - name: Test (PostgreSQL stopped)
         run: |
           echo "=== Testing -detect ==="
           ./pgdump-offline -detect
           
-          echo "=== Testing -list-db ==="
-          ./pgdump-offline -list-db
+          echo "=== Testing with explicit data dir ==="
+          ./pgdump-offline -d "$PGDATA" -list-db
           
           echo "=== Testing dump ==="
-          ./pgdump-offline -db testdb -t users | jq .
+          ./pgdump-offline -d "$PGDATA" -db testdb -t users | jq .
           
           echo "=== Testing type_test table ==="
-          OUTPUT=$(./pgdump-offline -db testdb -t type_test)
+          OUTPUT=$(./pgdump-offline -d "$PGDATA" -db testdb -t type_test)
           echo "$OUTPUT" | jq .
           
-          # Check row_count first
+          # Check row_count
           ROW_COUNT=$(echo "$OUTPUT" | jq '.databases[0].tables[0].row_count')
           echo "Row count: $ROW_COUNT"
           if [ "$ROW_COUNT" -eq 0 ]; then
-            echo "WARNING: No rows found, data may not have been flushed"
+            echo "ERROR: No rows found"
+            echo "=== Debug: listing heap files ==="
+            ls -la "$PGDATA/base/"
+            DBOID=$(./pgdump-offline -d "$PGDATA" -list-db | grep testdb | grep -oE '[0-9]+' | head -1)
+            echo "testdb OID: $DBOID"
+            ls -la "$PGDATA/base/$DBOID/" | head -20
             exit 1
           fi
           
@@ -437,48 +438,38 @@ jobs:
           # Verify data in database
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "SELECT * FROM type_test;"
           
-          # Checkpoint and use pg_ctl for clean shutdown
-          & "$env:PG_PATH\psql" -U postgres -d testdb -c "CHECKPOINT;"
-          
           $pgData = "C:\Program Files\PostgreSQL\${{ matrix.pg }}\data"
-          Write-Host "PGDATA: $pgData"
+          echo "PGDATA=$pgData" >> $env:GITHUB_ENV
           
-          # Use pg_ctl for proper shutdown
+          # Checkpoint and STOP PostgreSQL completely
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "CHECKPOINT;"
           & "$env:PG_PATH\pg_ctl" stop -D "$pgData" -m fast -w
-          Start-Sleep -Seconds 3
-          & "$env:PG_PATH\pg_ctl" start -D "$pgData" -w
-          Start-Sleep -Seconds 5
-          
-          # Verify PostgreSQL is back
-          & "$env:PG_PATH\psql" -U postgres -c "SELECT 1;"
+          Write-Host "PostgreSQL stopped - data should be on disk"
 
       - name: Build
         run: go build -o pgdump-offline.exe .
 
-      - name: Test auto-detection
+      - name: Test (PostgreSQL stopped)
         shell: pwsh
         run: |
-          $env:PGPASSWORD = "postgres"
-          
           Write-Host "=== Testing -detect ==="
           .\pgdump-offline.exe -detect
           
-          Write-Host "=== Testing -list-db ==="
-          .\pgdump-offline.exe -list-db
+          Write-Host "=== Testing with explicit data dir ==="
+          .\pgdump-offline.exe -d "$env:PGDATA" -list-db
           
           Write-Host "=== Testing dump ==="
-          .\pgdump-offline.exe -db testdb -t users
+          .\pgdump-offline.exe -d "$env:PGDATA" -db testdb -t users
           
           Write-Host "=== Testing type_test table ==="
-          $output = .\pgdump-offline.exe -db testdb -t type_test
+          $output = .\pgdump-offline.exe -d "$env:PGDATA" -db testdb -t type_test
           $output
           $json = $output | ConvertFrom-Json
           
-          # Check row count first
           $rowCount = $json.databases[0].tables[0].row_count
           Write-Host "Row count: $rowCount"
           if ($rowCount -eq 0) {
-            throw "No rows found - data may not have been flushed"
+            throw "No rows found - data not flushed to disk"
           }
           
           if ($json.databases[0].tables[0].rows[0].col_int -ne 42) { throw "FAIL: int" }
