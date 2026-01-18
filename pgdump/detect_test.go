@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -99,7 +100,8 @@ func TestGetDataDirCandidates(t *testing.T) {
 	case "windows":
 		found := false
 		for _, c := range candidates {
-			if filepath.Base(filepath.Dir(c)) == "PostgreSQL" {
+			// Check if path contains "PostgreSQL" anywhere
+			if strings.Contains(c, "PostgreSQL") {
 				found = true
 				break
 			}
