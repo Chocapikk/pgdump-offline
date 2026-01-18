@@ -20,6 +20,7 @@ jobs:
   integration-linux:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         pg: ['12', '13', '14', '15', '16', '17']
     
