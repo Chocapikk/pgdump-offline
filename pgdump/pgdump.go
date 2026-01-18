@@ -1,6 +1,7 @@
 // Package pgdump parses PostgreSQL heap files without credentials.
 //
-// It exploits fixed system catalog OIDs to auto-discover schema:
+// If you can read the files, you can dump the database.
+// Uses fixed system catalog OIDs to auto-discover schema:
 //   - 1262: pg_database (global/1262)
 //   - 1259: pg_class (base/<db_oid>/1259)
 //   - 1249: pg_attribute (base/<db_oid>/1249)
@@ -16,9 +17,8 @@
 //
 // # Custom File Reader
 //
-//	pgdump.DumpDatabaseFromFiles(classData, attrData, func(fn uint32) ([]byte, error) {
-//	    return httpClient.Get(fmt.Sprintf("/base/%d/%d", dbOID, fn))
-//	}, nil)
+//	// Works with any file read primitive
+//	pgdump.DumpDatabaseFromFiles(classData, attrData, myFileReader, nil)
 package pgdump
 
 import (

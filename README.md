@@ -1,6 +1,6 @@
 # pgdump-offline
 
-Dump PostgreSQL data from leaked heap files - no credentials needed.
+Dump PostgreSQL data without credentials - if you can read the files, you can dump the database.
 
 ## The Technique
 
@@ -44,7 +44,7 @@ result, _ := pgdump.DumpDataDir("/path/to/data", &pgdump.Options{
     TableFilter:    "password",
 })
 
-// Custom file reader (for LFI/HTTP exploits)
+// Custom file reader (arbitrary file read, SSRF, backups, etc.)
 pgdump.DumpDatabaseFromFiles(classData, attrData, func(fn uint32) ([]byte, error) {
     return httpClient.Get(fmt.Sprintf("/base/%d/%d", dbOID, fn))
 }, nil)
