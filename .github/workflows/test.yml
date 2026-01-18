@@ -472,13 +472,27 @@ jobs:
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "CREATE TABLE type_test (col_int INTEGER, col_text TEXT, col_bool BOOLEAN, col_float DOUBLE PRECISION, col_uuid UUID, col_inet INET, col_point POINT, col_jsonb JSONB, col_date DATE);"
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "INSERT INTO type_test VALUES (42, 'test', true, 3.14, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '192.168.1.1', '(1,2)', '{\"secret\": \"pass\"}', '2025-01-18');"
           
-          # Verify and flush
+          # Verify data is in database
+          Write-Host "=== Verifying data in database ==="
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "SELECT * FROM type_test;"
-          & "$env:PG_PATH\psql" -U postgres -c "CHECKPOINT;"
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "SELECT count(*) FROM type_test;"
           
-          # Stop PostgreSQL
+          # Force sync to disk
+          & "$env:PG_PATH\psql" -U postgres -c "CHECKPOINT;"
+          Start-Sleep -Seconds 3
+          
+          # Stop PostgreSQL with immediate mode to ensure all data is flushed
+          Write-Host "=== Stopping PostgreSQL ==="
           & "$env:PG_PATH\pg_ctl" stop -D $env:PGDATA -m fast -w
-          Write-Host "PostgreSQL stopped"
+          Start-Sleep -Seconds 3
+          
+          # Verify files exist
+          Write-Host "=== Checking data files ==="
+          Get-ChildItem -Path "$env:PGDATA\base" -Directory | ForEach-Object { 
+            Write-Host "Database OID: $($_.Name)"
+            Get-ChildItem -Path $_.FullName -File | Select-Object -First 5 | ForEach-Object { Write-Host "  $($_.Name)" }
+          }
+          Write-Host "PostgreSQL stopped - data should be on disk"
 
       - name: Build
         run: go build -o pgdump-offline.exe .
