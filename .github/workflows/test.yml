@@ -586,13 +586,13 @@ jobs:
 
       - name: Run integration tests with coverage
         if: matrix.pg == '16'
-        shell: pwsh
+        shell: bash
         run: |
-          $env:PGDUMP_TESTDATA = $env:PGDATA
+          export PGDUMP_TESTDATA="$PGDATA"
           go test -v -coverprofile=coverage-windows.out -covermode=atomic ./pgdump/...
           
-          Write-Host "=== Windows Coverage ==="
-          go tool cover -func=coverage-windows.out | Select-String "total:"
+          echo "=== Windows Coverage ==="
+          go tool cover -func=coverage-windows.out | grep total
 
       - name: Upload Windows coverage artifact
         if: matrix.pg == '16'
