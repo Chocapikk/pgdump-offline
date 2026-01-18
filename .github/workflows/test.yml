@@ -139,10 +139,24 @@ jobs:
           }
           echo "testdb found!"
 
+      - name: Debug pg_class
+        run: |
+          echo "=== Tables in testdb via psql ==="
+          docker exec pg psql -U postgres -d testdb -c "\dt"
+          
+          echo "=== Check pg_class file exists ==="
+          docker exec pg ls -la /var/lib/postgresql/data/base/16384/ | head -20
+          
+          echo "=== Parse pg_class ==="
+          docker exec pg pgdump-offline -f /var/lib/postgresql/data/base/16384/1259 2>&1 | head -50
+
       - name: Test full dump
         run: |
-          echo "=== Testing full dump ==="
+          echo "=== Testing full dump (all tables) ==="
           docker exec pg pgdump-offline -d /var/lib/postgresql/data/ -db testdb | tee dump.json
+          
+          echo "=== Tables found ==="
+          cat dump.json | jq '.databases[0].tables[].name' 2>/dev/null || echo "No tables"
           
           # Verify output
           cat dump.json | jq -e '.databases[0].name == "testdb"'
