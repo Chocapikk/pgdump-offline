@@ -29,6 +29,8 @@ func ReadRows(data []byte, columns []Column, visibleOnly bool) []map[string]inte
 
 // Debug enables debug output for tuple decoding
 var Debug bool
+// DebugTable filters debug output to specific table name
+var DebugTable string
 
 // DecodeTuple decodes a tuple using column schema
 func DecodeTuple(tuple *HeapTupleData, columns []Column) map[string]interface{} {
@@ -71,8 +73,8 @@ func DecodeTuple(tuple *HeapTupleData, columns []Column) map[string]interface{} 
 				}
 				dataPreview = fmt.Sprintf(" raw=%x", tuple.Data[offset:end])
 			}
-			fmt.Printf("DEBUG: col=%s num=%d offset=%d->%d (align=%d) consumed=%d val=%v%s\n", 
-				col.Name, num, prevOffset, offset, colAlign, consumed, val, dataPreview)
+			fmt.Printf("DEBUG: col=%s num=%d offset=%d->%d (align=%d/%c) len=%d consumed=%d val=%v%s\n", 
+				col.Name, num, prevOffset, offset, colAlign, col.Align, col.Len, consumed, val, dataPreview)
 		}
 		result[col.Name] = val
 		offset += consumed
