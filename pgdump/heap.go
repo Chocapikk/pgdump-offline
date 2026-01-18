@@ -61,7 +61,7 @@ func typeAlign(typID, length int) int {
 	
 	switch typID {
 	// Double alignment (8 bytes)
-	case OidInt8, OidFloat8, OidTimestamp, OidTimestampTZ, OidTime, OidMoney:
+	case OidInt8, OidFloat8, OidTimestamp, OidTimestampTZ, OidTime, OidMoney, OidPgLsn:
 		return 8
 	case OidPoint, OidLseg, OidBox, OidLine, OidCircle: // geometric types
 		return 8
@@ -82,11 +82,11 @@ func typeAlign(typID, length int) int {
 		return 4
 		
 	// Short alignment (2 bytes)
-	case OidInt2:
+	case OidInt2, OidTid:
 		return 2
 		
 	// Char alignment (1 byte)
-	case OidBool, OidChar, OidUUID, OidMacaddr, OidMacaddr8:
+	case OidBool, OidChar, OidName, OidUUID, OidMacaddr, OidMacaddr8:
 		return 1
 	}
 	
