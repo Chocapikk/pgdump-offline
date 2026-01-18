@@ -454,9 +454,12 @@ jobs:
           Write-Host "Initializing database in $pgData..."
           & "$pgPath\initdb" -D $pgData -U postgres -A trust -E UTF8
           
-          # Configure PostgreSQL to listen on localhost
+          # Configure PostgreSQL to listen on localhost and force sync writes
           Add-Content -Path "$pgData\postgresql.conf" -Value "listen_addresses = 'localhost'"
           Add-Content -Path "$pgData\postgresql.conf" -Value "port = 5432"
+          Add-Content -Path "$pgData\postgresql.conf" -Value "fsync = on"
+          Add-Content -Path "$pgData\postgresql.conf" -Value "synchronous_commit = on"
+          Add-Content -Path "$pgData\postgresql.conf" -Value "full_page_writes = on"
           
           # Start PostgreSQL
           Write-Host "Starting PostgreSQL..."
@@ -488,20 +491,29 @@ jobs:
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "SELECT * FROM type_test;"
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "SELECT count(*) FROM type_test;"
           
-          # Force sync to disk
-          & "$env:PG_PATH\psql" -U postgres -c "CHECKPOINT;"
-          Start-Sleep -Seconds 3
+          # Get database OID for debugging
+          Write-Host "=== Database OIDs ==="
+          & "$env:PG_PATH\psql" -U postgres -c "SELECT oid, datname FROM pg_database;"
           
-          # Stop PostgreSQL with immediate mode to ensure all data is flushed
+          # Get table info
+          Write-Host "=== Table info ==="
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "SELECT oid, relname, relfilenode FROM pg_class WHERE relname = 'type_test';"
+          
+          # Force multiple checkpoints and sync
+          & "$env:PG_PATH\psql" -U postgres -c "CHECKPOINT;"
+          & "$env:PG_PATH\psql" -U postgres -c "CHECKPOINT;"
+          Start-Sleep -Seconds 2
+          
+          # Stop PostgreSQL with smart mode first, then fast to ensure clean shutdown
           Write-Host "=== Stopping PostgreSQL ==="
           & "$env:PG_PATH\pg_ctl" stop -D $env:PGDATA -m fast -w
-          Start-Sleep -Seconds 3
+          Start-Sleep -Seconds 5
           
           # Verify files exist
           Write-Host "=== Checking data files ==="
           Get-ChildItem -Path "$env:PGDATA\base" -Directory | ForEach-Object { 
             Write-Host "Database OID: $($_.Name)"
-            Get-ChildItem -Path $_.FullName -File | Select-Object -First 5 | ForEach-Object { Write-Host "  $($_.Name)" }
+            Get-ChildItem -Path $_.FullName -File | Select-Object -First 10 | ForEach-Object { Write-Host "  $($_.Name) - $($_.Length) bytes" }
           }
           Write-Host "PostgreSQL stopped - data should be on disk"
 
