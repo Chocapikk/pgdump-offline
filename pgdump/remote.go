@@ -466,6 +466,20 @@ func (c *RemoteClient) ExecPretty(args []string) string {
 			}
 		}
 
+	case "version":
+		return c.Version()
+
+	case "control":
+		ctrl := c.Control()
+		if ctrl == nil {
+			return "could not read pg_control"
+		}
+		b.WriteString(fmt.Sprintf("PostgreSQL %d\n", ctrl.PGVersionMajor))
+		b.WriteString(fmt.Sprintf("State: %s\n", ctrl.StateString))
+		b.WriteString(fmt.Sprintf("Checkpoint: %s\n", ctrl.CheckpointLSN))
+		b.WriteString(fmt.Sprintf("Timeline: %d\n", ctrl.TimeLineID))
+		b.WriteString(fmt.Sprintf("System ID: %d\n", ctrl.SystemIdentifier))
+
 	case "query":
 		if len(args) < 3 {
 			return "usage: query <database> <table>"
