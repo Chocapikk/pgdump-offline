@@ -7,24 +7,21 @@ on:
     branches: [master, main]
 
 jobs:
-  test:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: go test -v ./... -run "TestDecode|TestParseJSONB"
+
+  integration:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        pg_version: ['12', '13', '14', '15', '16', '17']
+        pg: ['12', '13', '14', '15', '16', '17']
     
-    services:
-      postgres:
-        image: postgres:${{ matrix.pg_version }}
-        env:
-          POSTGRES_PASSWORD: testpass
-          POSTGRES_DB: testdb
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - uses: actions/checkout@v4
 
@@ -32,74 +29,112 @@ jobs:
         with:
           go-version: '1.22'
 
+      - name: Build binary
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o pgdump-offline .
+
+      - name: Start PostgreSQL ${{ matrix.pg }}
+        run: |
+          docker run -d --name pg \
+            -e POSTGRES_PASSWORD=testpass \
+            -e POSTGRES_DB=testdb \
+            postgres:${{ matrix.pg }}
+          
+          # Wait for PostgreSQL to be ready
+          for i in {1..30}; do
+            docker exec pg pg_isready -U postgres && break
+            sleep 1
+          done
+
       - name: Create test data
         run: |
-          # Install psql
-          sudo apt-get update && sudo apt-get install -y postgresql-client
-          
-          # Create test tables
-          PGPASSWORD=testpass psql -h localhost -U postgres -d testdb << 'EOF'
+          docker exec pg psql -U postgres -d testdb << 'EOF'
           CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             email VARCHAR(255),
             password_hash VARCHAR(255),
-            is_admin BOOLEAN DEFAULT false
+            is_admin BOOLEAN DEFAULT false,
+            created_at TIMESTAMP DEFAULT NOW()
           );
           INSERT INTO users (email, password_hash, is_admin) VALUES
             ('admin@test.com', '$argon2id$v=19$m=4096,t=3,p=1$salt$hash', true),
-            ('user@test.com', '$argon2id$v=19$m=4096,t=3,p=1$salt$hash2', false);
+            ('user1@test.com', '$argon2id$v=19$m=4096,t=3,p=1$salt$hash2', false),
+            ('user2@test.com', '$argon2id$v=19$m=4096,t=3,p=1$salt$hash3', false);
           
           CREATE TABLE secrets (
             id SERIAL PRIMARY KEY,
-            name VARCHAR(255),
-            value JSONB
+            name VARCHAR(255) UNIQUE,
+            value JSONB NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
           );
           INSERT INTO secrets (name, value) VALUES
-            ('aws_creds', '{"access_key": "AKIA...", "secret_key": "wJalr..."}'),
-            ('db_config', '{"host": "db.internal", "password": "secret123"}');
+            ('aws_credentials', '{"access_key": "AKIAIOSFODNN7EXAMPLE", "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}'),
+            ('database_url', '{"host": "db.internal", "port": 5432, "password": "supersecret123"}'),
+            ('api_keys', '{"stripe": "sk_live_xxx", "github": "ghp_xxxx"}');
           
-          -- Force checkpoint to ensure data is written
+          CREATE TABLE tokens (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id),
+            token VARCHAR(255),
+            expires_at TIMESTAMPTZ
+          );
+          INSERT INTO tokens (user_id, token, expires_at) VALUES
+            (1, 'admin_token_abc123', NOW() + INTERVAL '1 day'),
+            (2, 'user_token_def456', NOW() + INTERVAL '1 hour');
+          
           CHECKPOINT;
           EOF
 
-      - name: Copy PostgreSQL data
-        run: |
-          # Get container ID
-          CONTAINER=$(docker ps -q --filter "ancestor=postgres:${{ matrix.pg_version }}")
-          
-          # Copy data directory
-          mkdir -p testdata
-          docker cp $CONTAINER:/var/lib/postgresql/data/global testdata/
-          docker cp $CONTAINER:/var/lib/postgresql/data/base testdata/
-          
-          # List what we got
-          ls -la testdata/
-          ls -la testdata/global/
-          ls -la testdata/base/
+      - name: Copy binary to container
+        run: docker cp pgdump-offline pg:/usr/local/bin/
 
-      - name: Run tests
+      - name: Test pg_database parsing
         run: |
-          export PGDUMP_TESTDATA=./testdata
-          go test -v ./...
+          echo "=== Testing pg_database ==="
+          docker exec pg pgdump-offline -f /var/lib/postgresql/data/global/1262
 
-      - name: Test CLI
+      - name: Test full dump
         run: |
-          go build -o pgdump-offline .
-          ./pgdump-offline -d ./testdata -db testdb -t users | jq .
-          ./pgdump-offline -d ./testdata -db testdb -t secrets | jq '.databases[0].tables[0].rows[0].value'
+          echo "=== Testing full dump ==="
+          docker exec pg pgdump-offline -d /var/lib/postgresql/data/ -db testdb | tee dump.json
+          
+          # Verify output
+          cat dump.json | jq -e '.databases[0].name == "testdb"'
+          cat dump.json | jq -e '.databases[0].tables | length > 0'
+
+      - name: Test table filtering
+        run: |
+          echo "=== Testing secrets table ==="
+          docker exec pg pgdump-offline -d /var/lib/postgresql/data/ -db testdb -t secrets | tee secrets.json
+          
+          # Verify JSONB parsing
+          cat secrets.json | jq -e '.databases[0].tables[0].rows[0].value.access_key'
+
+      - name: Test users table
+        run: |
+          echo "=== Testing users table ==="
+          docker exec pg pgdump-offline -d /var/lib/postgresql/data/ -db testdb -t users | tee users.json
+          
+          # Verify data
+          cat users.json | jq -e '.databases[0].tables[0].rows | length == 3'
+          cat users.json | jq -r '.databases[0].tables[0].rows[0].password_hash' | grep -q 'argon2'
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f pg || true
 
   build:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [unit-tests, integration]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Build binaries
+      - name: Build all platforms
         run: |
+          mkdir -p dist
           GOOS=linux GOARCH=amd64 go build -o dist/pgdump-offline-linux-amd64 .
           GOOS=darwin GOARCH=amd64 go build -o dist/pgdump-offline-darwin-amd64 .
           GOOS=darwin GOARCH=arm64 go build -o dist/pgdump-offline-darwin-arm64 .
