@@ -1,4 +1,4 @@
-package pkg
+package pgdump
 
 // ReadTuples extracts all visible tuples from heap file data
 func ReadTuples(data []byte, visibleOnly bool) []TupleEntry {

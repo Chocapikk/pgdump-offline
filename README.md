@@ -13,13 +13,19 @@ With a file read vulnerability, leak these 3 files to discover the entire schema
 
 ## Installation
 
+### As CLI Tool
+
 ```bash
 go install github.com/chocapikk/pgdump-offline@latest
 ```
 
-Or download pre-built binaries from releases.
+### As Library
 
-## Usage
+```bash
+go get github.com/chocapikk/pgdump-offline/pgdump
+```
+
+## CLI Usage
 
 ```bash
 # Auto-discover and dump everything
@@ -40,6 +46,77 @@ pgdump-offline -d /path/to/pg_data/ -t secret
 pgdump-offline -f /path/to/1262  # pg_database
 pgdump-offline -f /path/to/1259  # pg_class
 pgdump-offline -f /path/to/1249  # pg_attribute
+```
+
+## Library Usage
+
+### High-Level API
+
+```go
+import "github.com/chocapikk/pgdump-offline/pgdump"
+
+// Dump entire data directory
+result, err := pgdump.DumpDataDir("/var/lib/postgresql/data", nil)
+
+// With options
+result, err := pgdump.DumpDataDir("/path/to/data", &pgdump.Options{
+    DatabaseFilter: "mydb",
+    TableFilter:    "password",
+    ListOnly:       false,
+})
+
+// Access results
+for _, db := range result.Databases {
+    for _, table := range db.Tables {
+        for _, row := range table.Rows {
+            fmt.Printf("%s: %v\n", row["email"], row["password_hash"])
+        }
+    }
+}
+```
+
+### Low-Level API (for custom file readers)
+
+```go
+import "github.com/chocapikk/pgdump-offline/pgdump"
+
+// Parse pg_database to find databases
+dbData, _ := os.ReadFile("/leaked/global/1262")
+databases := pgdump.ParsePGDatabase(dbData)
+// => [{OID: 16384, Name: "windmill"}, ...]
+
+// Parse pg_class to find tables  
+classData, _ := os.ReadFile("/leaked/base/16384/1259")
+tables := pgdump.ParsePGClass(classData)
+// => map[filenode]TableInfo{16815: {Name: "password", OID: 16527}, ...}
+
+// Parse pg_attribute to get columns
+attrData, _ := os.ReadFile("/leaked/base/16384/1249")
+columns := pgdump.ParsePGAttribute(attrData, 0)
+// => map[tableOID][]AttrInfo{16527: [{Name: "email", TypID: 1043}, ...]}
+
+// Build schema and dump table
+schema := []pgdump.Column{
+    {Name: "email", TypID: pgdump.OidVarchar, Len: -1},
+    {Name: "password_hash", TypID: pgdump.OidVarchar, Len: -1},
+}
+tableData, _ := os.ReadFile("/leaked/base/16384/16815")
+rows := pgdump.ReadRows(tableData, schema, true)
+```
+
+### Integration with Custom File Readers
+
+```go
+// For use with HTTP-based file read vulnerabilities
+result, err := pgdump.DumpDatabaseFromFiles(
+    classData,  // pg_class content
+    attrData,   // pg_attribute content
+    func(filenode uint32) ([]byte, error) {
+        // Your custom file reader (HTTP, LFI exploit, etc.)
+        return httpReadFile(fmt.Sprintf("/base/16384/%d", filenode))
+    },
+    &pgdump.Options{TableFilter: "password"},
+)
 ```
 
 ## Example Output
@@ -90,15 +167,6 @@ base/<db_oid>/1259                  # pg_class
 base/<db_oid>/1249                  # pg_attribute
 base/<db_oid>/<filenode>            # Table data
 ```
-
-## How It Works
-
-1. Parse `global/1262` to find databases and their OIDs
-2. For each database, parse `base/<oid>/1259` to find tables
-3. Parse `base/<oid>/1249` to get column definitions
-4. Use column schema to decode table data files
-
-No SQL queries, no authentication - pure binary parsing.
 
 ## Building
 

@@ -1,4 +1,4 @@
-package pkg
+package pgdump
 
 // System catalog OIDs (fixed in all PostgreSQL versions)
 const (

@@ -1,5 +1,5 @@
 // Package pkg provides PostgreSQL heap file parsing functionality
-package pkg
+package pgdump
 
 import (
 	"encoding/binary"

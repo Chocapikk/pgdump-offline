@@ -1,4 +1,4 @@
-package pkg
+package pgdump
 
 import "encoding/binary"
 
