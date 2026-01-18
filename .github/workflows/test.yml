@@ -323,19 +323,32 @@ jobs:
           $PG_PATH/psql -h localhost -c "CREATE TABLE secrets (id SERIAL, name VARCHAR(255), value JSONB);" testdb
           $PG_PATH/psql -h localhost -c "INSERT INTO secrets (name, value) VALUES ('aws', '{\"key\": \"AKIA\"}');" testdb
           
-          # Test multiple types (removed money due to $ escaping issues)
+          # Test multiple types
           $PG_PATH/psql -h localhost -c "CREATE TABLE type_test (col_int INTEGER, col_text TEXT, col_bool BOOLEAN, col_float DOUBLE PRECISION, col_uuid UUID, col_inet INET, col_point POINT, col_jsonb JSONB, col_date DATE);" testdb
           $PG_PATH/psql -h localhost -c "INSERT INTO type_test VALUES (42, 'test', true, 3.14, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '192.168.1.1', '(1,2)', '{\"secret\": \"pass\"}', '2025-01-18');" testdb
           
-          # Checkpoint and restart to flush data to disk
-          $PG_PATH/psql -h localhost -c "CHECKPOINT;" testdb
-          brew services stop postgresql@${{ matrix.pg }}
-          sleep 3
-          brew services start postgresql@${{ matrix.pg }}
-          sleep 5
-          
-          # Verify data is there
+          # Verify data is in database
           $PG_PATH/psql -h localhost -c "SELECT * FROM type_test;" testdb
+          
+          # Force checkpoint and use pg_ctl for clean shutdown (flushes all data)
+          $PG_PATH/psql -h localhost -c "CHECKPOINT;" testdb
+          
+          # Find data directory
+          if [ -d /opt/homebrew/var/postgresql@${{ matrix.pg }} ]; then
+            PGDATA=/opt/homebrew/var/postgresql@${{ matrix.pg }}
+          else
+            PGDATA=/usr/local/var/postgresql@${{ matrix.pg }}
+          fi
+          echo "PGDATA=$PGDATA"
+          
+          # Use pg_ctl for proper shutdown (ensures WAL is flushed)
+          $PG_PATH/pg_ctl stop -D "$PGDATA" -m fast -w
+          sleep 2
+          $PG_PATH/pg_ctl start -D "$PGDATA" -w -l "$PGDATA/server.log"
+          sleep 3
+          
+          # Verify PostgreSQL is back up
+          $PG_PATH/psql -h localhost -c "SELECT 1;" testdb
 
       - name: Build
         run: go build -o pgdump-offline .
@@ -421,15 +434,23 @@ jobs:
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "CREATE TABLE type_test (col_int INTEGER, col_text TEXT, col_bool BOOLEAN, col_float DOUBLE PRECISION, col_uuid UUID, col_inet INET, col_point POINT, col_jsonb JSONB, col_date DATE);"
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "INSERT INTO type_test VALUES (42, 'test', true, 3.14, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '192.168.1.1', '(1,2)', '{\"secret\": \"pass\"}', '2025-01-18');"
           
-          # Checkpoint and restart to flush data
+          # Verify data in database
+          & "$env:PG_PATH\psql" -U postgres -d testdb -c "SELECT * FROM type_test;"
+          
+          # Checkpoint and use pg_ctl for clean shutdown
           & "$env:PG_PATH\psql" -U postgres -d testdb -c "CHECKPOINT;"
-          Stop-Service -Name "postgresql-x64-${{ matrix.pg }}" -Force -ErrorAction SilentlyContinue
+          
+          $pgData = "C:\Program Files\PostgreSQL\${{ matrix.pg }}\data"
+          Write-Host "PGDATA: $pgData"
+          
+          # Use pg_ctl for proper shutdown
+          & "$env:PG_PATH\pg_ctl" stop -D "$pgData" -m fast -w
           Start-Sleep -Seconds 3
-          Start-Service -Name "postgresql-x64-${{ matrix.pg }}"
+          & "$env:PG_PATH\pg_ctl" start -D "$pgData" -w
           Start-Sleep -Seconds 5
           
-          # Verify data
-          & "$env:PG_PATH\psql" -U postgres -d testdb -c "SELECT * FROM type_test;"
+          # Verify PostgreSQL is back
+          & "$env:PG_PATH\psql" -U postgres -c "SELECT 1;"
 
       - name: Build
         run: go build -o pgdump-offline.exe .
