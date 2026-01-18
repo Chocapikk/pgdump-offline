@@ -417,7 +417,15 @@ jobs:
         with:
           go-version: '1.22'
 
+      - name: Cache PostgreSQL binaries
+        uses: actions/cache@v4
+        id: pg-cache
+        with:
+          path: ${{ github.workspace }}/pgsql
+          key: postgresql-${{ matrix.pg }}-windows-x64
+
       - name: Download PostgreSQL ${{ matrix.pg }}
+        if: steps.pg-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           # Download official PostgreSQL binaries (no installer, just zip)
@@ -430,7 +438,10 @@ jobs:
           
           Write-Host "Extracting..."
           Expand-Archive -Path pg.zip -DestinationPath $env:GITHUB_WORKSPACE
-          
+
+      - name: Setup and start PostgreSQL
+        shell: pwsh
+        run: |
           $pgPath = "$env:GITHUB_WORKSPACE\pgsql\bin"
           $pgData = "$env:GITHUB_WORKSPACE\pgdata"
           $pgLog = "$env:GITHUB_WORKSPACE\pg.log"
