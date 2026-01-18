@@ -371,13 +371,14 @@ func TestDecodePgLsn(t *testing.T) {
 }
 
 func TestDecodeRange(t *testing.T) {
-	// int4range [1,10) - flags=0x02 (lower inc), lb=1, ub=10
+	// int4range [1,10)
+	// PostgreSQL format: [range_oid (4)][lower (4)][upper (4)][flags (1)]
+	// flags=0x02 (lower inclusive)
 	data := []byte{
-		0x02,                         // flags: lower inclusive
-		0x04, 0x00, 0x00, 0x00,       // lower bound len
-		0x01, 0x00, 0x00, 0x00,       // lower bound value: 1
-		0x04, 0x00, 0x00, 0x00,       // upper bound len
-		0x0A, 0x00, 0x00, 0x00,       // upper bound value: 10
+		0x40, 0x0F, 0x00, 0x00, // range type OID (3904 = int4range)
+		0x01, 0x00, 0x00, 0x00, // lower bound value: 1
+		0x0A, 0x00, 0x00, 0x00, // upper bound value: 10
+		0x02,                   // flags: lower inclusive (at the end!)
 	}
 	got := DecodeType(data, OidInt4Range)
 	str, ok := got.(string)
@@ -663,10 +664,26 @@ func TestDecodeEmptyRange(t *testing.T) {
 
 func TestDecodeRangeInfinite(t *testing.T) {
 	// Range with infinite lower and upper bounds
-	data := []byte{0x18} // flags: lb_inf (0x08) | ub_inf (0x10)
+	// flags: lb_inf (0x08) | ub_inf (0x10) = 0x18
+	data := []byte{
+		0x40, 0x0F, 0x00, 0x00, // range type OID
+		0x18,                   // flags at the end
+	}
 	got := DecodeType(data, OidInt4Range)
 	if got != "(,)" {
 		t.Errorf("DecodeType(infinite range) = %v, want (,)", got)
+	}
+}
+
+func TestDecodeRangeEmpty(t *testing.T) {
+	// Empty range: flags = 0x01
+	data := []byte{
+		0x40, 0x0F, 0x00, 0x00, // range type OID
+		0x01,                   // flags: empty
+	}
+	got := DecodeType(data, OidInt4Range)
+	if got != "empty" {
+		t.Errorf("DecodeType(empty range) = %v, want empty", got)
 	}
 }
 
@@ -677,11 +694,9 @@ func TestDecodeRangeMalformed(t *testing.T) {
 		data []byte
 		oid  int
 	}{
-		{"truncated", []byte{0x02, 0xFF, 0xFF}, OidInt4Range},
-		{"negative length", []byte{0x02, 0xFF, 0xFF, 0xFF, 0xFF}, OidInt4Range},
-		{"huge length", []byte{0x02, 0x00, 0x00, 0x00, 0x7F}, OidInt4Range},
+		{"too short", []byte{0x02, 0xFF, 0xFF}, OidInt4Range},
 		{"empty data", []byte{}, OidInt4Range},
-		{"just flags", []byte{0x02}, OidInt4Range},
+		{"minimal", []byte{0x00, 0x00, 0x00, 0x00, 0x18}, OidInt4Range},
 	}
 
 	for _, tt := range tests {

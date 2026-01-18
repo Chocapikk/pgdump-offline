@@ -325,77 +325,84 @@ func decodeBitString(data []byte) string {
 }
 
 func decodeRange(data []byte, oid int) string {
-	if len(data) == 0 {
+	// PostgreSQL range format (after varlena header):
+	// - range type OID: 4 bytes
+	// - lower bound (if present): fixed size based on element type
+	// - upper bound (if present): fixed size, aligned
+	// - flags: 1 byte AT THE END
+	
+	if len(data) < 5 { // minimum: 4 bytes OID + 1 byte flags
 		return "empty"
 	}
 
-	flags := data[0]
-	empty := (flags & 0x01) != 0
-	if empty {
+	// Flags are stored at the LAST byte
+	flags := data[len(data)-1]
+	
+	const (
+		rangeEmpty = 0x01
+		rangeLbInc = 0x02
+		rangeUbInc = 0x04
+		rangeLbInf = 0x08
+		rangeUbInf = 0x10
+	)
+
+	if flags&rangeEmpty != 0 {
 		return "empty"
 	}
 
-	lbInc := (flags & 0x02) != 0
-	ubInc := (flags & 0x04) != 0
-	lbInf := (flags & 0x08) != 0
-	ubInf := (flags & 0x10) != 0
+	lbInc := flags&rangeLbInc != 0
+	ubInc := flags&rangeUbInc != 0
+	lbInf := flags&rangeLbInf != 0
+	ubInf := flags&rangeUbInf != 0
 
-	var lb, ub string
-	offset := 1
-
-	// Determine element type
-	var elemOid int
+	// Determine element type and size
+	var elemOid, elemSize int
 	switch oid {
 	case OidInt4Range:
-		elemOid = OidInt4
+		elemOid, elemSize = OidInt4, 4
 	case OidInt8Range:
-		elemOid = OidInt8
-	case OidNumRange:
-		elemOid = OidNumeric
-	case OidTsRange:
-		elemOid = OidTimestamp
-	case OidTsTzRange:
-		elemOid = OidTimestampTZ
+		elemOid, elemSize = OidInt8, 8
 	case OidDateRange:
-		elemOid = OidDate
+		elemOid, elemSize = OidDate, 4
+	case OidTsRange:
+		elemOid, elemSize = OidTimestamp, 8
+	case OidTsTzRange:
+		elemOid, elemSize = OidTimestampTZ, 8
+	case OidNumRange:
+		// Numeric is variable length, handle separately
+		return decodeNumericRange(data, flags)
 	default:
-		// Unknown range type, return raw representation
 		return fmt.Sprintf("range:%x", data)
 	}
 
+	// Skip the range type OID (4 bytes)
+	offset := 4
+	dataEnd := len(data) - 1 // exclude flags byte
+
+	var lb, ub string
+
+	// Read lower bound if present
 	if !lbInf {
-		// Read lower bound length and value
-		if offset+4 > len(data) {
+		if offset+elemSize > dataEnd {
 			return "[?,?]"
 		}
-		lbLen := int(i32(data, offset))
-		offset += 4
-		// Sanity check: length must be positive and within bounds
-		if lbLen < 0 || lbLen > len(data)-offset {
-			return "[?,?]"
-		}
-		if lbLen > 0 {
-			lb = fmt.Sprintf("%v", DecodeType(data[offset:offset+lbLen], elemOid))
-		}
-		offset += lbLen
+		lb = fmt.Sprintf("%v", DecodeType(data[offset:offset+elemSize], elemOid))
+		offset += elemSize
 	}
 
+	// Read upper bound if present (may need alignment)
 	if !ubInf {
-		if offset+4 > len(data) {
+		// Align offset for upper bound
+		if elemSize > 1 {
+			offset = align(offset, elemSize)
+		}
+		if offset+elemSize > dataEnd {
 			return "[?,?]"
 		}
-		ubLen := int(i32(data, offset))
-		offset += 4
-		// Sanity check: length must be positive and within bounds
-		if ubLen < 0 || ubLen > len(data)-offset {
-			return "[?,?]"
-		}
-		if ubLen > 0 {
-			ub = fmt.Sprintf("%v", DecodeType(data[offset:offset+ubLen], elemOid))
-		}
+		ub = fmt.Sprintf("%v", DecodeType(data[offset:offset+elemSize], elemOid))
 	}
 
-	// Format
+	// Format output
 	var result strings.Builder
 	if lbInc {
 		result.WriteByte('[')
@@ -417,6 +424,45 @@ func decodeRange(data []byte, oid int) string {
 		result.WriteByte(')')
 	}
 
+	return result.String()
+}
+
+func decodeNumericRange(data []byte, flags byte) string {
+	// Numeric ranges have variable-length bounds, more complex to parse
+	// For now, return a simplified representation
+	const (
+		rangeLbInc = 0x02
+		rangeUbInc = 0x04
+		rangeLbInf = 0x08
+		rangeUbInf = 0x10
+	)
+
+	lbInc := flags&rangeLbInc != 0
+	ubInc := flags&rangeUbInc != 0
+	lbInf := flags&rangeLbInf != 0
+	ubInf := flags&rangeUbInf != 0
+
+	var result strings.Builder
+	if lbInc {
+		result.WriteByte('[')
+	} else {
+		result.WriteByte('(')
+	}
+	if lbInf {
+		result.WriteString(",")
+	} else {
+		result.WriteString("?,")
+	}
+	if ubInf {
+		// nothing
+	} else {
+		result.WriteString("?")
+	}
+	if ubInc {
+		result.WriteByte(']')
+	} else {
+		result.WriteByte(')')
+	}
 	return result.String()
 }
 
