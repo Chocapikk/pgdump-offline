@@ -149,8 +149,12 @@ func typeAlign(typID, length int) int {
 	case OidInt2, OidTid:
 		return 2
 		
+	// Int alignment (4 bytes) - macaddr types
+	case OidMacaddr, OidMacaddr8:
+		return 4
+		
 	// Char alignment (1 byte)
-	case OidBool, OidChar, OidName, OidUUID, OidMacaddr, OidMacaddr8:
+	case OidBool, OidChar, OidName, OidUUID:
 		return 1
 	}
 	
