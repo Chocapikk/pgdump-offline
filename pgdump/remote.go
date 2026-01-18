@@ -1,12 +1,12 @@
 package pgdump
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
 
 // RemoteReader reads files from a PostgreSQL data directory given relative paths
-// Example paths: "global/1260", "base/16384/1259", "PG_VERSION"
 type RemoteReader func(path string) ([]byte, error)
 
 // RemoteClient provides a high-level interface to explore PostgreSQL data remotely
@@ -15,8 +15,8 @@ type RemoteClient struct {
 	version int
 	cache   struct {
 		databases []DatabaseInfo
-		tables    map[uint32]map[uint32]TableInfo // db OID -> filenode -> table
-		columns   map[uint32]map[uint32][]AttrInfo // db OID -> relid -> columns
+		tables    map[uint32]map[uint32]TableInfo
+		columns   map[uint32]map[uint32][]AttrInfo
 	}
 }
 
@@ -25,17 +25,209 @@ func NewRemoteClient(reader RemoteReader) *RemoteClient {
 	c := &RemoteClient{reader: reader}
 	c.cache.tables = make(map[uint32]map[uint32]TableInfo)
 	c.cache.columns = make(map[uint32]map[uint32][]AttrInfo)
-
-	// Detect version
 	if data, err := reader("PG_VERSION"); err == nil {
-		v := strings.TrimSpace(string(data))
-		fmt.Sscanf(v, "%d", &c.version)
+		fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &c.version)
 	}
-
 	return c
 }
 
-// Version returns the PostgreSQL version string
+// Result is the interface for all command results
+type Result interface {
+	String() string
+}
+
+// --- Result Types ---
+
+type VersionResult string
+
+func (v VersionResult) String() string { return string(v) }
+
+type ControlResult struct{ *ControlFile }
+
+func (c ControlResult) String() string {
+	if c.ControlFile == nil {
+		return "could not read pg_control"
+	}
+	return fmt.Sprintf("PostgreSQL %d\nState: %s\nCheckpoint: %s\nTimeline: %d\nSystem ID: %d",
+		c.PGVersionMajor, c.StateString, c.CheckpointLSN, c.TimeLineID, c.SystemIdentifier)
+}
+
+type CredsResult []AuthInfo
+
+func (c CredsResult) String() string {
+	var b strings.Builder
+	for _, cr := range c {
+		if cr.Password != "" {
+			b.WriteString(fmt.Sprintf("%s:%s\n", cr.RoleName, cr.Password))
+		}
+	}
+	return b.String()
+}
+
+type DatabasesResult []DatabaseInfo
+
+func (d DatabasesResult) String() string {
+	var b strings.Builder
+	b.WriteString("NAME                 OID\n")
+	for _, db := range d {
+		b.WriteString(fmt.Sprintf("%-20s %d\n", db.Name, db.OID))
+	}
+	return b.String()
+}
+
+type TablesResult []TableInfo
+
+func (t TablesResult) String() string {
+	var b strings.Builder
+	b.WriteString("NAME                           KIND   OID\n")
+	for _, tbl := range t {
+		if tbl.Kind == "r" {
+			b.WriteString(fmt.Sprintf("%-30s table  %d\n", tbl.Name, tbl.OID))
+		}
+	}
+	return b.String()
+}
+
+type ColumnsResult []AttrInfo
+
+func (c ColumnsResult) String() string {
+	var b strings.Builder
+	b.WriteString("NAME                 TYPE\n")
+	for _, col := range c {
+		if col.Num > 0 {
+			b.WriteString(fmt.Sprintf("%-20s %s\n", col.Name, TypeName(col.TypID)))
+		}
+	}
+	return b.String()
+}
+
+type QueryResult []map[string]any
+
+func (q QueryResult) String() string {
+	if len(q) == 0 {
+		return "no data"
+	}
+	var b strings.Builder
+	var cols []string
+	for k := range q[0] {
+		cols = append(cols, k)
+	}
+	for _, col := range cols {
+		b.WriteString(fmt.Sprintf("%-20s", truncate(col, 20)))
+	}
+	b.WriteString("\n")
+	for _, row := range q {
+		for _, col := range cols {
+			b.WriteString(fmt.Sprintf("%-20s", truncate(fmt.Sprintf("%v", row[col]), 20)))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+type DumpDatabaseResult struct{ *DatabaseDump }
+
+func (d DumpDatabaseResult) String() string {
+	if d.DatabaseDump == nil {
+		return ""
+	}
+	return formatDump(d.DatabaseDump)
+}
+
+type DumpAllResult struct{ *DumpResult }
+
+func (d DumpAllResult) String() string {
+	if d.DumpResult == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, db := range d.Databases {
+		b.WriteString(formatDump(&db))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+type SummaryResult struct {
+	version string
+	creds   []AuthInfo
+	dbs     []DatabaseInfo
+	tables  map[uint32][]TableInfo
+}
+
+func (s SummaryResult) String() string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("PostgreSQL %s\n\n", s.version))
+
+	hasCreds := false
+	for _, cr := range s.creds {
+		if cr.Password != "" {
+			if !hasCreds {
+				b.WriteString("CREDENTIALS\n")
+				hasCreds = true
+			}
+			role := ""
+			if cr.RolSuper {
+				role = " [superuser]"
+			}
+			b.WriteString(fmt.Sprintf("  %s%s\n    %s\n", cr.RoleName, role, cr.Password))
+		}
+	}
+	if hasCreds {
+		b.WriteString("\n")
+	}
+
+	b.WriteString("DATABASES\n")
+	for _, db := range s.dbs {
+		if strings.HasPrefix(db.Name, "template") {
+			continue
+		}
+		tables := s.tables[db.OID]
+		userTables := 0
+		var tableNames []string
+		for _, t := range tables {
+			if !strings.HasPrefix(t.Name, "pg_") && t.Kind == "r" {
+				userTables++
+				if !strings.HasPrefix(t.Name, "sql_") {
+					tableNames = append(tableNames, t.Name)
+				}
+			}
+		}
+		if len(tableNames) > 0 {
+			b.WriteString(fmt.Sprintf("  %s: %s\n", db.Name, strings.Join(tableNames, ", ")))
+		} else {
+			b.WriteString(fmt.Sprintf("  %s (%d tables)\n", db.Name, userTables))
+		}
+	}
+	return b.String()
+}
+
+func (s SummaryResult) MarshalJSON() ([]byte, error) {
+	summary := &Summary{Version: s.version, Databases: make(map[string][]string)}
+	for _, cr := range s.creds {
+		if cr.Password != "" {
+			summary.Credentials = append(summary.Credentials, cr.RoleName+":"+cr.Password)
+		}
+	}
+	for _, db := range s.dbs {
+		if strings.HasPrefix(db.Name, "template") {
+			continue
+		}
+		for _, t := range s.tables[db.OID] {
+			if !strings.HasPrefix(t.Name, "pg_") && !strings.HasPrefix(t.Name, "sql_") && t.Kind == "r" {
+				summary.Databases[db.Name] = append(summary.Databases[db.Name], t.Name)
+			}
+		}
+	}
+	return json.Marshal(summary)
+}
+
+type ErrorResult string
+
+func (e ErrorResult) String() string { return string(e) }
+
+// --- Client Methods ---
+
 func (c *RemoteClient) Version() string {
 	if data, err := c.reader("PG_VERSION"); err == nil {
 		return strings.TrimSpace(string(data))
@@ -43,7 +235,6 @@ func (c *RemoteClient) Version() string {
 	return ""
 }
 
-// Control returns the pg_control file info
 func (c *RemoteClient) Control() *ControlFile {
 	if data, err := c.reader("global/pg_control"); err == nil {
 		if ctrl, err := ParseControlFile(data); err == nil {
@@ -53,7 +244,6 @@ func (c *RemoteClient) Control() *ControlFile {
 	return nil
 }
 
-// Credentials returns all user credentials (pg_authid)
 func (c *RemoteClient) Credentials() []AuthInfo {
 	if data, err := c.reader(fmt.Sprintf("global/%d", PGAuthID)); err == nil {
 		return ParsePGAuthID(data)
@@ -61,7 +251,6 @@ func (c *RemoteClient) Credentials() []AuthInfo {
 	return nil
 }
 
-// Databases returns all databases
 func (c *RemoteClient) Databases() []DatabaseInfo {
 	if c.cache.databases != nil {
 		return c.cache.databases
@@ -72,7 +261,6 @@ func (c *RemoteClient) Databases() []DatabaseInfo {
 	return c.cache.databases
 }
 
-// Database returns a specific database by name
 func (c *RemoteClient) Database(name string) *DatabaseInfo {
 	for _, db := range c.Databases() {
 		if strings.EqualFold(db.Name, name) {
@@ -82,15 +270,11 @@ func (c *RemoteClient) Database(name string) *DatabaseInfo {
 	return nil
 }
 
-// loadCatalog loads pg_class and pg_attribute for a database
 func (c *RemoteClient) loadCatalog(dbOID uint32) {
 	if _, ok := c.cache.tables[dbOID]; ok {
 		return
 	}
-
 	base := fmt.Sprintf("base/%d", dbOID)
-
-	// Load tables
 	classData, err := c.reader(fmt.Sprintf("%s/%d", base, PGClass))
 	if err != nil {
 		c.cache.tables[dbOID] = make(map[uint32]TableInfo)
@@ -98,8 +282,6 @@ func (c *RemoteClient) loadCatalog(dbOID uint32) {
 		return
 	}
 	c.cache.tables[dbOID] = ParsePGClass(classData)
-
-	// Load columns
 	attrData, err := c.reader(fmt.Sprintf("%s/%d", base, PGAttribute))
 	if err != nil {
 		c.cache.columns[dbOID] = make(map[uint32][]AttrInfo)
@@ -108,7 +290,6 @@ func (c *RemoteClient) loadCatalog(dbOID uint32) {
 	c.cache.columns[dbOID] = ParsePGAttribute(attrData, c.version)
 }
 
-// Tables returns all tables in a database
 func (c *RemoteClient) Tables(dbOID uint32) []TableInfo {
 	c.loadCatalog(dbOID)
 	var tables []TableInfo
@@ -118,16 +299,13 @@ func (c *RemoteClient) Tables(dbOID uint32) []TableInfo {
 	return tables
 }
 
-// TablesByName returns all tables in a database by name
 func (c *RemoteClient) TablesByName(dbName string) []TableInfo {
-	db := c.Database(dbName)
-	if db == nil {
-		return nil
+	if db := c.Database(dbName); db != nil {
+		return c.Tables(db.OID)
 	}
-	return c.Tables(db.OID)
+	return nil
 }
 
-// Table returns a specific table by name
 func (c *RemoteClient) Table(dbOID uint32, tableName string) *TableInfo {
 	c.loadCatalog(dbOID)
 	for _, t := range c.cache.tables[dbOID] {
@@ -138,49 +316,40 @@ func (c *RemoteClient) Table(dbOID uint32, tableName string) *TableInfo {
 	return nil
 }
 
-// Columns returns all columns for a table
 func (c *RemoteClient) Columns(dbOID, tableOID uint32) []AttrInfo {
 	c.loadCatalog(dbOID)
 	return c.cache.columns[dbOID][tableOID]
 }
 
-// ColumnNames returns just column names for a table
 func (c *RemoteClient) ColumnNames(dbOID, tableOID uint32) []string {
 	var names []string
 	for _, col := range c.Columns(dbOID, tableOID) {
-		if col.Num > 0 { // Skip system columns
+		if col.Num > 0 {
 			names = append(names, col.Name)
 		}
 	}
 	return names
 }
 
-// QueryOptions configures data extraction
 type QueryOptions struct {
-	Columns []string // Specific columns to extract (empty = all)
-	Limit   int      // Max rows (0 = unlimited)
+	Columns []string
+	Limit   int
 }
 
-// Query extracts data from a table
 func (c *RemoteClient) Query(dbOID uint32, table *TableInfo, opts *QueryOptions) []map[string]any {
 	if table == nil || table.Filenode == 0 {
 		return nil
 	}
-
-	base := fmt.Sprintf("base/%d", dbOID)
-	data, err := c.reader(fmt.Sprintf("%s/%d", base, table.Filenode))
+	data, err := c.reader(fmt.Sprintf("base/%d/%d", dbOID, table.Filenode))
 	if err != nil {
 		return nil
 	}
-
 	attrs := c.Columns(dbOID, table.OID)
 	cols := make([]Column, len(attrs))
 	for i, a := range attrs {
 		cols[i] = Column{Name: a.Name, TypID: a.TypID, Len: a.Len, Num: a.Num, Align: a.Align}
 	}
 	rows := ReadRows(data, cols, true)
-
-	// Filter columns if specified
 	if opts != nil && len(opts.Columns) > 0 {
 		filtered := make([]map[string]any, 0, len(rows))
 		for _, row := range rows {
@@ -194,58 +363,40 @@ func (c *RemoteClient) Query(dbOID uint32, table *TableInfo, opts *QueryOptions)
 		}
 		rows = filtered
 	}
-
-	// Apply limit
 	if opts != nil && opts.Limit > 0 && len(rows) > opts.Limit {
 		rows = rows[:opts.Limit]
 	}
-
 	return rows
 }
 
-// QueryByName extracts data from a table by database and table name
 func (c *RemoteClient) QueryByName(dbName, tableName string, opts *QueryOptions) []map[string]any {
-	db := c.Database(dbName)
-	if db == nil {
-		return nil
+	if db := c.Database(dbName); db != nil {
+		if table := c.Table(db.OID, tableName); table != nil {
+			return c.Query(db.OID, table, opts)
+		}
 	}
-	table := c.Table(db.OID, tableName)
-	return c.Query(db.OID, table, opts)
+	return nil
 }
 
-// DumpTable dumps a complete table with metadata
 func (c *RemoteClient) DumpTable(dbOID uint32, table *TableInfo) *TableDump {
 	if table == nil {
 		return nil
 	}
 	rows := c.Query(dbOID, table, nil)
-
-	// Convert column names to ColumnInfo
 	var cols []ColumnInfo
 	for _, a := range c.Columns(dbOID, table.OID) {
 		if a.Num > 0 {
 			cols = append(cols, ColumnInfo{Name: a.Name, TypID: a.TypID, Type: TypeName(a.TypID)})
 		}
 	}
-
-	return &TableDump{
-		OID:      table.OID,
-		Name:     table.Name,
-		Filenode: table.Filenode,
-		Kind:     table.Kind,
-		Columns:  cols,
-		Rows:     rows,
-		RowCount: len(rows),
-	}
+	return &TableDump{OID: table.OID, Name: table.Name, Filenode: table.Filenode, Kind: table.Kind, Columns: cols, Rows: rows, RowCount: len(rows)}
 }
 
-// DumpDatabase dumps all user tables in a database
 func (c *RemoteClient) DumpDatabase(dbOID uint32) *DatabaseDump {
 	db := c.findDB(dbOID)
 	if db == nil {
 		return nil
 	}
-
 	dump := &DatabaseDump{OID: dbOID, Name: db.Name}
 	for _, t := range c.Tables(dbOID) {
 		if strings.HasPrefix(t.Name, "pg_") || strings.HasPrefix(t.Name, "sql_") {
@@ -258,16 +409,13 @@ func (c *RemoteClient) DumpDatabase(dbOID uint32) *DatabaseDump {
 	return dump
 }
 
-// DumpDatabaseByName dumps a database by name
 func (c *RemoteClient) DumpDatabaseByName(name string) *DatabaseDump {
-	db := c.Database(name)
-	if db == nil {
-		return nil
+	if db := c.Database(name); db != nil {
+		return c.DumpDatabase(db.OID)
 	}
-	return c.DumpDatabase(db.OID)
+	return nil
 }
 
-// DumpAll dumps everything
 func (c *RemoteClient) DumpAll() *DumpResult {
 	result := &DumpResult{}
 	for _, db := range c.Databases() {
@@ -290,94 +438,23 @@ func (c *RemoteClient) findDB(oid uint32) *DatabaseInfo {
 	return nil
 }
 
-// Summary is a lightweight overview
-type Summary struct {
-	Version     string              `json:"version,omitempty"`
-	Credentials []string            `json:"credentials,omitempty"`
-	Databases   map[string][]string `json:"databases,omitempty"`
-}
-
-// Summary returns a lightweight overview of the PostgreSQL instance
-func (c *RemoteClient) Summary() *Summary {
-	s := &Summary{
-		Version:   c.Version(),
-		Databases: make(map[string][]string),
+func (c *RemoteClient) Summary() SummaryResult {
+	s := SummaryResult{
+		version: c.Version(),
+		creds:   c.Credentials(),
+		dbs:     c.Databases(),
+		tables:  make(map[uint32][]TableInfo),
 	}
-
-	for _, cred := range c.Credentials() {
-		if cred.Password != "" {
-			s.Credentials = append(s.Credentials, cred.RoleName+":"+cred.Password)
+	for _, db := range s.dbs {
+		if !strings.HasPrefix(db.Name, "template") {
+			s.tables[db.OID] = c.Tables(db.OID)
 		}
 	}
-
-	for _, db := range c.Databases() {
-		if strings.HasPrefix(db.Name, "template") {
-			continue
-		}
-		for _, t := range c.Tables(db.OID) {
-			if !strings.HasPrefix(t.Name, "pg_") && !strings.HasPrefix(t.Name, "sql_") {
-				s.Databases[db.Name] = append(s.Databases[db.Name], t.Name)
-			}
-		}
-	}
-
 	return s
 }
 
-// Exec executes a command and returns the result as any (for JSON output)
-func (c *RemoteClient) Exec(args []string) any {
-	if len(args) == 0 {
-		return c.Summary()
-	}
-
-	cmd := args[0]
-	switch cmd {
-	case "summary":
-		return c.Summary()
-	case "creds", "credentials":
-		return c.Credentials()
-	case "dbs", "databases":
-		return c.Databases()
-	case "control":
-		return c.Control()
-	case "version":
-		return c.Version()
-	case "tables":
-		if len(args) < 2 {
-			return nil
-		}
-		return c.TablesByName(args[1])
-	case "columns":
-		if len(args) < 3 {
-			return nil
-		}
-		db := c.Database(args[1])
-		if db == nil {
-			return nil
-		}
-		table := c.Table(db.OID, args[2])
-		if table == nil {
-			return nil
-		}
-		return c.Columns(db.OID, table.OID)
-	case "query":
-		if len(args) < 3 {
-			return nil
-		}
-		return c.QueryByName(args[1], args[2], nil)
-	case "dump":
-		if len(args) >= 2 {
-			return c.DumpDatabaseByName(args[1])
-		}
-		return c.DumpAll()
-	default:
-		return nil
-	}
-}
-
-// ExecPretty executes a command and returns a human-readable string
-func (c *RemoteClient) ExecPretty(args []string) string {
-	var b strings.Builder
+// Exec executes a command and returns a Result (implements String() for pretty output)
+func (c *RemoteClient) Exec(args []string) Result {
 	cmd := ""
 	if len(args) > 0 {
 		cmd = args[0]
@@ -385,151 +462,53 @@ func (c *RemoteClient) ExecPretty(args []string) string {
 
 	switch cmd {
 	case "", "summary":
-		b.WriteString(fmt.Sprintf("PostgreSQL %s\n\n", c.Version()))
-		if creds := c.Credentials(); len(creds) > 0 {
-			b.WriteString("CREDENTIALS\n")
-			for _, cr := range creds {
-				if cr.Password != "" {
-					role := ""
-					if cr.RolSuper {
-						role = " [superuser]"
-					}
-					b.WriteString(fmt.Sprintf("  %s%s\n    %s\n", cr.RoleName, role, cr.Password))
-				}
-			}
-			b.WriteString("\n")
-		}
-		b.WriteString("DATABASES\n")
-		for _, db := range c.Databases() {
-			if strings.HasPrefix(db.Name, "template") {
-				continue
-			}
-			tables := c.Tables(db.OID)
-			userTables := 0
-			var tableNames []string
-			for _, t := range tables {
-				if !strings.HasPrefix(t.Name, "pg_") && t.Kind == "r" {
-					userTables++
-					if !strings.HasPrefix(t.Name, "sql_") {
-						tableNames = append(tableNames, t.Name)
-					}
-				}
-			}
-			if len(tableNames) > 0 {
-				b.WriteString(fmt.Sprintf("  %s: %s\n", db.Name, strings.Join(tableNames, ", ")))
-			} else {
-				b.WriteString(fmt.Sprintf("  %s (%d tables)\n", db.Name, userTables))
-			}
-		}
-
+		return c.Summary()
+	case "version":
+		return VersionResult(c.Version())
+	case "control":
+		return ControlResult{c.Control()}
 	case "creds", "credentials":
-		for _, cr := range c.Credentials() {
-			if cr.Password != "" {
-				b.WriteString(fmt.Sprintf("%s:%s\n", cr.RoleName, cr.Password))
-			}
-		}
-
+		return CredsResult(c.Credentials())
 	case "dbs", "databases":
-		b.WriteString("NAME                 OID\n")
-		for _, db := range c.Databases() {
-			b.WriteString(fmt.Sprintf("%-20s %d\n", db.Name, db.OID))
-		}
-
+		return DatabasesResult(c.Databases())
 	case "tables":
 		if len(args) < 2 {
-			return "usage: tables <database>"
+			return ErrorResult("usage: tables <database>")
 		}
-		tables := c.TablesByName(args[1])
-		b.WriteString("NAME                           KIND   OID\n")
-		for _, t := range tables {
-			if t.Kind == "r" {
-				b.WriteString(fmt.Sprintf("%-30s table  %d\n", t.Name, t.OID))
-			}
-		}
-
+		return TablesResult(c.TablesByName(args[1]))
 	case "columns":
 		if len(args) < 3 {
-			return "usage: columns <database> <table>"
+			return ErrorResult("usage: columns <database> <table>")
 		}
 		db := c.Database(args[1])
 		if db == nil {
-			return "database not found"
+			return ErrorResult("database not found")
 		}
 		table := c.Table(db.OID, args[2])
 		if table == nil {
-			return "table not found"
+			return ErrorResult("table not found")
 		}
-		b.WriteString("NAME                 TYPE\n")
-		for _, col := range c.Columns(db.OID, table.OID) {
-			if col.Num > 0 {
-				b.WriteString(fmt.Sprintf("%-20s %s\n", col.Name, TypeName(col.TypID)))
-			}
-		}
-
-	case "version":
-		return c.Version()
-
-	case "control":
-		ctrl := c.Control()
-		if ctrl == nil {
-			return "could not read pg_control"
-		}
-		b.WriteString(fmt.Sprintf("PostgreSQL %d\n", ctrl.PGVersionMajor))
-		b.WriteString(fmt.Sprintf("State: %s\n", ctrl.StateString))
-		b.WriteString(fmt.Sprintf("Checkpoint: %s\n", ctrl.CheckpointLSN))
-		b.WriteString(fmt.Sprintf("Timeline: %d\n", ctrl.TimeLineID))
-		b.WriteString(fmt.Sprintf("System ID: %d\n", ctrl.SystemIdentifier))
-
+		return ColumnsResult(c.Columns(db.OID, table.OID))
 	case "query":
 		if len(args) < 3 {
-			return "usage: query <database> <table>"
+			return ErrorResult("usage: query <database> <table>")
 		}
-		rows := c.QueryByName(args[1], args[2], &QueryOptions{Limit: 20})
-		if len(rows) == 0 {
-			return "no data"
-		}
-		// Get columns from first row
-		var cols []string
-		for k := range rows[0] {
-			cols = append(cols, k)
-		}
-		// Header
-		for _, col := range cols {
-			b.WriteString(fmt.Sprintf("%-20s", truncate(col, 20)))
-		}
-		b.WriteString("\n")
-		// Rows
-		for _, row := range rows {
-			for _, col := range cols {
-				val := fmt.Sprintf("%v", row[col])
-				b.WriteString(fmt.Sprintf("%-20s", truncate(val, 20)))
-			}
-			b.WriteString("\n")
-		}
-
+		return QueryResult(c.QueryByName(args[1], args[2], &QueryOptions{Limit: 20}))
 	case "dump":
 		if len(args) >= 2 {
-			dump := c.DumpDatabaseByName(args[1])
-			if dump != nil {
-				b.WriteString(formatDump(dump))
-			}
-		} else {
-			for _, db := range c.Databases() {
-				if strings.HasPrefix(db.Name, "template") {
-					continue
-				}
-				if dump := c.DumpDatabase(db.OID); dump != nil {
-					b.WriteString(formatDump(dump))
-					b.WriteString("\n")
-				}
-			}
+			return DumpDatabaseResult{c.DumpDatabaseByName(args[1])}
 		}
-
+		return DumpAllResult{c.DumpAll()}
 	default:
-		return "unknown command"
+		return ErrorResult("unknown command: " + cmd)
 	}
+}
 
-	return b.String()
+// Summary type for JSON
+type Summary struct {
+	Version     string              `json:"version,omitempty"`
+	Credentials []string            `json:"credentials,omitempty"`
+	Databases   map[string][]string `json:"databases,omitempty"`
 }
 
 func truncate(s string, n int) string {
@@ -547,7 +526,6 @@ func formatDump(dump *DatabaseDump) string {
 		if len(t.Rows) == 0 {
 			continue
 		}
-		// Get columns
 		var cols []string
 		for k := range t.Rows[0] {
 			cols = append(cols, k)
@@ -558,11 +536,11 @@ func formatDump(dump *DatabaseDump) string {
 		b.WriteString("\n")
 		for _, row := range t.Rows {
 			for _, col := range cols {
-				val := fmt.Sprintf("%v", row[col])
-				b.WriteString(fmt.Sprintf("%-20s", truncate(val, 20)))
+				b.WriteString(fmt.Sprintf("%-20s", truncate(fmt.Sprintf("%v", row[col]), 20)))
 			}
 			b.WriteString("\n")
 		}
 	}
 	return b.String()
 }
+
