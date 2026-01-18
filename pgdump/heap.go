@@ -57,7 +57,17 @@ func DecodeTuple(tuple *HeapTupleData, columns []Column) map[string]interface{} 
 
 		if tuple.IsNull(num) {
 			if Debug {
-				fmt.Printf("DEBUG: col=%s num=%d offset=%d->%d (align=%d) NULL\n", col.Name, num, prevOffset, offset, colAlign)
+				bitmapInfo := "no bitmap"
+				if tuple.Bitmap != nil {
+					byteIdx := (num - 1) / 8
+					bitIdx := (num - 1) % 8
+					if byteIdx < len(tuple.Bitmap) {
+						bitmapInfo = fmt.Sprintf("bitmap[%d]=%08b bit%d=0", byteIdx, tuple.Bitmap[byteIdx], bitIdx)
+					} else {
+						bitmapInfo = fmt.Sprintf("bitmap len=%d < needed %d", len(tuple.Bitmap), byteIdx+1)
+					}
+				}
+				fmt.Printf("DEBUG: col=%s num=%d offset=%d (align=%d) NULL (%s)\n", col.Name, num, offset, colAlign, bitmapInfo)
 			}
 			result[col.Name] = nil
 			continue
