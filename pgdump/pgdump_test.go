@@ -739,8 +739,14 @@ func TestDecodeXML(t *testing.T) {
 func TestDecodeJSON(t *testing.T) {
 	data := []byte(`{"key": "value"}`)
 	got := DecodeType(data, OidJSON)
-	if got != `{"key": "value"}` {
-		t.Errorf("DecodeType(json) = %v, want '{\"key\": \"value\"}'", got)
+	// JSON is now parsed into a map
+	m, ok := got.(map[string]interface{})
+	if !ok {
+		t.Errorf("DecodeType(json) = %T, want map[string]interface{}", got)
+		return
+	}
+	if m["key"] != "value" {
+		t.Errorf("DecodeType(json)[\"key\"] = %v, want 'value'", m["key"])
 	}
 }
 

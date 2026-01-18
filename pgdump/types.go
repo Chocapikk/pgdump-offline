@@ -2,6 +2,7 @@ package pgdump
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -193,7 +194,15 @@ func decodeScalar(data []byte, oid int) interface{} {
 		return fmt.Sprintf("$%.2f", float64(cents)/100)
 
 	// Text types
-	case OidText, OidVarchar, OidBpchar, OidJSON, OidXML, OidJSONPath:
+	case OidText, OidVarchar, OidBpchar, OidXML, OidJSONPath:
+		return safeString(data)
+	
+	// JSON (stored as text, parse it)
+	case OidJSON:
+		var v interface{}
+		if err := json.Unmarshal(data, &v); err == nil {
+			return v
+		}
 		return safeString(data)
 	case OidBytea:
 		return fmt.Sprintf("\\x%x", data)
