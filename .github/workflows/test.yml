@@ -239,7 +239,8 @@ jobs:
           echo "$OUTPUT" | jq '{
             col_bool, col_int2, col_int4, col_int8, col_float4, col_float8,
             col_numeric, col_money, col_char, col_varchar, col_text, col_bytea,
-            col_date, col_inet, col_point, col_uuid, col_json, col_jsonb,
+            col_date, col_inet, col_cidr, col_macaddr, col_macaddr8,
+            col_point, col_uuid, col_json, col_jsonb,
             col_int4range, col_int_array, col_text_array
           }' <<< "$(echo "$OUTPUT" | jq '.databases[0].tables[0].rows[0]')"
           
