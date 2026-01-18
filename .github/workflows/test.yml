@@ -149,20 +149,29 @@ jobs:
           brew services start postgresql@16
           sleep 5
           
+          # Find the right path
+          if [ -d /opt/homebrew/opt/postgresql@16 ]; then
+            PG_PATH=/opt/homebrew/opt/postgresql@16/bin
+          else
+            PG_PATH=/usr/local/opt/postgresql@16/bin
+          fi
+          
           # Create test database
-          /opt/homebrew/opt/postgresql@16/bin/createdb -h localhost testdb || \
-          /usr/local/opt/postgresql@16/bin/createdb -h localhost testdb
+          $PG_PATH/createdb -h localhost testdb
 
       - name: Create test data
         run: |
-          PSQL=$(/opt/homebrew/opt/postgresql@16/bin/psql 2>/dev/null && echo /opt/homebrew/opt/postgresql@16/bin/psql || echo /usr/local/opt/postgresql@16/bin/psql)
-          $PSQL -h localhost -d testdb << 'EOF'
-          CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));
-          INSERT INTO users (email, password_hash) VALUES ('admin@test.com', '$argon2id$hash');
-          CREATE TABLE secrets (id SERIAL, name VARCHAR(255), value JSONB);
-          INSERT INTO secrets (name, value) VALUES ('aws', '{"key": "AKIA..."}');
-          CHECKPOINT;
-          EOF
+          if [ -f /opt/homebrew/opt/postgresql@16/bin/psql ]; then
+            PSQL=/opt/homebrew/opt/postgresql@16/bin/psql
+          else
+            PSQL=/usr/local/opt/postgresql@16/bin/psql
+          fi
+          
+          $PSQL -h localhost -c "CREATE TABLE users (id SERIAL, email VARCHAR(255), password_hash VARCHAR(255));" testdb
+          $PSQL -h localhost -c "INSERT INTO users (email, password_hash) VALUES ('admin@test.com', '\$argon2id\$hash');" testdb
+          $PSQL -h localhost -c "CREATE TABLE secrets (id SERIAL, name VARCHAR(255), value JSONB);" testdb
+          $PSQL -h localhost -c "INSERT INTO secrets (name, value) VALUES ('aws', '{\"key\": \"AKIA...\"}');" testdb
+          $PSQL -h localhost -c "CHECKPOINT;" testdb
 
       - name: Build
         run: go build -o pgdump-offline .
