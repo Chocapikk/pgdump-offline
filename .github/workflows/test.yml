@@ -48,7 +48,7 @@ jobs:
 
       - name: Build binary
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o pgdump-offline .
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o pgread .
 
       - name: Start PostgreSQL ${{ matrix.pg }}
         run: |
@@ -180,7 +180,7 @@ jobs:
           done
 
       - name: Copy binary to container
-        run: docker cp pgdump-offline pg:/usr/local/bin/
+        run: docker cp pgread pg:/usr/local/bin/
 
       - name: Debug PostgreSQL
         run: |
@@ -198,10 +198,10 @@ jobs:
       - name: Verify testdb exists in pg_database
         run: |
           echo "=== Databases in pg_database file ==="
-          docker exec pg pgdump-offline -d /var/lib/postgresql/data/ -list-db
+          docker exec pg pgread -d /var/lib/postgresql/data/ -list-db
           
           echo "=== Verify testdb is present ==="
-          docker exec pg pgdump-offline -d /var/lib/postgresql/data/ -list-db | grep -q testdb || {
+          docker exec pg pgread -d /var/lib/postgresql/data/ -list-db | grep -q testdb || {
             echo "ERROR: testdb not found in pg_database!"
             echo "=== Raw pg_database file ==="
             docker exec pg xxd /var/lib/postgresql/data/global/1262 | head -100
@@ -222,18 +222,18 @@ jobs:
           docker exec pg ls -la /var/lib/postgresql/data/base/$TESTDB_OID/ | head -20
           
           echo "=== 4. Parse pg_class directly ==="
-          docker exec pg pgdump-offline -f /var/lib/postgresql/data/base/$TESTDB_OID/1259 2>&1 | grep -E "(users|secrets|all_types|Table:)" | head -20
+          docker exec pg pgread -f /var/lib/postgresql/data/base/$TESTDB_OID/1259 2>&1 | grep -E "(users|secrets|all_types|Table:)" | head -20
           
           echo "=== 5. Full dump of testdb ==="
-          docker exec pg pgdump-offline -d /var/lib/postgresql/data/ -db testdb 2>&1 | head -200
+          docker exec pg pgread -d /var/lib/postgresql/data/ -db testdb 2>&1 | head -200
           
           echo "=== 6. Verify tables exist ==="
-          docker exec pg pgdump-offline -d /var/lib/postgresql/data/ -db testdb | jq '.databases[0].tables[]?.name' | head -20
+          docker exec pg pgread -d /var/lib/postgresql/data/ -db testdb | jq '.databases[0].tables[]?.name' | head -20
 
       - name: Verify all types parsing
         run: |
           echo "=== Dumping all_types table ==="
-          OUTPUT=$(docker exec pg pgdump-offline -d /var/lib/postgresql/data/ -db testdb -t all_types)
+          OUTPUT=$(docker exec pg pgread -d /var/lib/postgresql/data/ -db testdb -t all_types)
           
           # Show key columns for debugging
           echo "$OUTPUT" | jq '{
@@ -369,21 +369,21 @@ jobs:
           ls -la "$PGDATA/base/"
 
       - name: Build
-        run: go build -o pgdump-offline .
+        run: go build -o pgread .
 
       - name: Test (PostgreSQL stopped)
         run: |
           echo "=== Testing -detect ==="
-          ./pgdump-offline -detect
+          ./pgread -detect
           
           echo "=== Testing with explicit data dir ==="
-          ./pgdump-offline -d "$PGDATA" -list-db
+          ./pgread -d "$PGDATA" -list-db
           
           echo "=== Testing dump ==="
-          ./pgdump-offline -d "$PGDATA" -db testdb -t users | jq .
+          ./pgread -d "$PGDATA" -db testdb -t users | jq .
           
           echo "=== Testing type_test table ==="
-          OUTPUT=$(./pgdump-offline -d "$PGDATA" -db testdb -t type_test)
+          OUTPUT=$(./pgread -d "$PGDATA" -db testdb -t type_test)
           echo "$OUTPUT" | jq .
           
           # Check row_count
@@ -393,7 +393,7 @@ jobs:
             echo "ERROR: No rows found"
             echo "=== Debug: listing heap files ==="
             ls -la "$PGDATA/base/"
-            DBOID=$(./pgdump-offline -d "$PGDATA" -list-db | grep testdb | grep -oE '[0-9]+' | head -1)
+            DBOID=$(./pgread -d "$PGDATA" -list-db | grep testdb | grep -oE '[0-9]+' | head -1)
             echo "testdb OID: $DBOID"
             ls -la "$PGDATA/base/$DBOID/" | head -20
             exit 1
@@ -521,22 +521,22 @@ jobs:
           Write-Host "PostgreSQL stopped - data should be on disk"
 
       - name: Build
-        run: go build -o pgdump-offline.exe .
+        run: go build -o pgread.exe .
 
       - name: Test (PostgreSQL stopped)
         shell: pwsh
         run: |
           Write-Host "=== Testing -detect ==="
-          .\pgdump-offline.exe -detect
+          .\pgread.exe -detect
           
           Write-Host "=== Testing with explicit data dir ==="
-          .\pgdump-offline.exe -d "$env:PGDATA" -list-db
+          .\pgread.exe -d "$env:PGDATA" -list-db
           
           Write-Host "=== Testing dump ==="
-          .\pgdump-offline.exe -d "$env:PGDATA" -db testdb -t users
+          .\pgread.exe -d "$env:PGDATA" -db testdb -t users
           
           Write-Host "=== Testing type_test table ==="
-          $output = .\pgdump-offline.exe -d "$env:PGDATA" -db testdb -t type_test
+          $output = .\pgread.exe -d "$env:PGDATA" -db testdb -t type_test
           $output
           $json = $output | ConvertFrom-Json
           
@@ -679,10 +679,10 @@ jobs:
       - name: Build all platforms
         run: |
           mkdir -p dist
-          GOOS=linux GOARCH=amd64 go build -o dist/pgdump-offline-linux-amd64 .
-          GOOS=darwin GOARCH=amd64 go build -o dist/pgdump-offline-darwin-amd64 .
-          GOOS=darwin GOARCH=arm64 go build -o dist/pgdump-offline-darwin-arm64 .
-          GOOS=windows GOARCH=amd64 go build -o dist/pgdump-offline-windows-amd64.exe .
+          GOOS=linux GOARCH=amd64 go build -o dist/pgread-linux-amd64 .
+          GOOS=darwin GOARCH=amd64 go build -o dist/pgread-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -o dist/pgread-darwin-arm64 .
+          GOOS=windows GOARCH=amd64 go build -o dist/pgread-windows-amd64.exe .
 
       - uses: actions/upload-artifact@v4
         with:

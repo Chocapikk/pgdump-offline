@@ -1,8 +1,8 @@
-# pgdump-offline
+# pgread
 
-[![Test](https://github.com/Chocapikk/pgdump-offline/actions/workflows/test.yml/badge.svg)](https://github.com/Chocapikk/pgdump-offline/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/Chocapikk/pgdump-offline/branch/main/graph/badge.svg)](https://codecov.io/gh/Chocapikk/pgdump-offline)
-[![Go Report Card](https://goreportcard.com/badge/github.com/Chocapikk/pgdump-offline)](https://goreportcard.com/report/github.com/Chocapikk/pgdump-offline)
+[![Test](https://github.com/Chocapikk/pgread/actions/workflows/test.yml/badge.svg)](https://github.com/Chocapikk/pgread/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/Chocapikk/pgread/branch/main/graph/badge.svg)](https://codecov.io/gh/Chocapikk/pgread)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Chocapikk/pgread)](https://goreportcard.com/report/github.com/Chocapikk/pgread)
 
 Dump PostgreSQL data without credentials - if you can read the files, you can dump the database.
 
@@ -21,23 +21,23 @@ Leak these 3 files → discover entire schema → dump any table.
 ## Install
 
 ```bash
-go install github.com/Chocapikk/pgdump-offline@latest
+go install github.com/Chocapikk/pgread@latest
 ```
 
 ## CLI
 
 ```bash
-pgdump-offline -d /path/to/data/              # Dump all
-pgdump-offline -d /path/to/data/ -db mydb     # Specific database
-pgdump-offline -d /path/to/data/ -t password  # Filter tables
-pgdump-offline -d /path/to/data/ -list        # Schema only
-pgdump-offline -f /path/to/1262               # Parse single file
+pgread -d /path/to/data/              # Dump all
+pgread -d /path/to/data/ -db mydb     # Specific database
+pgread -d /path/to/data/ -t password  # Filter tables
+pgread -d /path/to/data/ -list        # Schema only
+pgread -f /path/to/1262               # Parse single file
 ```
 
 ## Library
 
 ```go
-import "github.com/Chocapikk/pgdump-offline/pgdump"
+import "github.com/Chocapikk/pgread/pgdump"
 
 // Simple
 result, _ := pgdump.DumpDataDir("/var/lib/postgresql/data", nil)
@@ -94,8 +94,8 @@ row := pgdump.DecodeTuple(tuple, columns)
 
 ```bash
 go build
-GOOS=windows go build -o pgdump-offline.exe
-GOOS=darwin GOARCH=arm64 go build -o pgdump-offline-macos
+GOOS=windows go build -o pgread.exe
+GOOS=darwin GOARCH=arm64 go build -o pgread-macos
 ```
 
 ## License

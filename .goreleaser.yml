@@ -1,6 +1,6 @@
 version: 2
 
-project_name: pgdump-offline
+project_name: pgread
 
 before:
   hooks:
@@ -8,7 +8,7 @@ before:
 
 builds:
   - main: .
-    binary: pgdump-offline
+    binary: pgread
     env:
       - CGO_ENABLED=0
     goos:
@@ -20,7 +20,7 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/Chocapikk/pgdump-offline/pgdump.Version={{.Version}}
+      - -X github.com/Chocapikk/pgread/pgdump.Version={{.Version}}
 
 archives:
   - formats:
@@ -45,4 +45,4 @@ changelog:
 release:
   github:
     owner: Chocapikk
-    name: pgdump-offline
+    name: pgread

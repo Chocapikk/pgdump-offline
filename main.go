@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Chocapikk/pgdump-offline/pgdump"
+	"github.com/Chocapikk/pgread/pgdump"
 )
 
 
