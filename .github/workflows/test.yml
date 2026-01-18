@@ -1,0 +1,111 @@
+name: Test
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pg_version: ['12', '13', '14', '15', '16', '17']
+    
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg_version }}
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Create test data
+        run: |
+          # Install psql
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          
+          # Create test tables
+          PGPASSWORD=testpass psql -h localhost -U postgres -d testdb << 'EOF'
+          CREATE TABLE users (
+            id SERIAL PRIMARY KEY,
+            email VARCHAR(255),
+            password_hash VARCHAR(255),
+            is_admin BOOLEAN DEFAULT false
+          );
+          INSERT INTO users (email, password_hash, is_admin) VALUES
+            ('admin@test.com', '$argon2id$v=19$m=4096,t=3,p=1$salt$hash', true),
+            ('user@test.com', '$argon2id$v=19$m=4096,t=3,p=1$salt$hash2', false);
+          
+          CREATE TABLE secrets (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255),
+            value JSONB
+          );
+          INSERT INTO secrets (name, value) VALUES
+            ('aws_creds', '{"access_key": "AKIA...", "secret_key": "wJalr..."}'),
+            ('db_config', '{"host": "db.internal", "password": "secret123"}');
+          
+          -- Force checkpoint to ensure data is written
+          CHECKPOINT;
+          EOF
+
+      - name: Copy PostgreSQL data
+        run: |
+          # Get container ID
+          CONTAINER=$(docker ps -q --filter "ancestor=postgres:${{ matrix.pg_version }}")
+          
+          # Copy data directory
+          mkdir -p testdata
+          docker cp $CONTAINER:/var/lib/postgresql/data/global testdata/
+          docker cp $CONTAINER:/var/lib/postgresql/data/base testdata/
+          
+          # List what we got
+          ls -la testdata/
+          ls -la testdata/global/
+          ls -la testdata/base/
+
+      - name: Run tests
+        run: |
+          export PGDUMP_TESTDATA=./testdata
+          go test -v ./...
+
+      - name: Test CLI
+        run: |
+          go build -o pgdump-offline .
+          ./pgdump-offline -d ./testdata -db testdb -t users | jq .
+          ./pgdump-offline -d ./testdata -db testdb -t secrets | jq '.databases[0].tables[0].rows[0].value'
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build binaries
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o dist/pgdump-offline-linux-amd64 .
+          GOOS=darwin GOARCH=amd64 go build -o dist/pgdump-offline-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -o dist/pgdump-offline-darwin-arm64 .
+          GOOS=windows GOARCH=amd64 go build -o dist/pgdump-offline-windows-amd64.exe .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/

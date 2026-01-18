@@ -10,10 +10,12 @@ import (
 	"github.com/Chocapikk/pgdump-offline/pgdump"
 )
 
+var version = "dev"
+
 func main() {
 	var (
 		dataDir, singleFile, dbFilter, tableFilter string
-		listOnly, verbose                          bool
+		listOnly, verbose, showVersion             bool
 	)
 
 	flag.StringVar(&dataDir, "d", "", "PostgreSQL data directory")
@@ -22,8 +24,14 @@ func main() {
 	flag.StringVar(&tableFilter, "t", "", "Filter tables containing string")
 	flag.BoolVar(&listOnly, "list", false, "List schema only, no data")
 	flag.BoolVar(&verbose, "v", false, "Verbose output")
+	flag.BoolVar(&showVersion, "version", false, "Show version")
 	flag.Usage = usage
 	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("pgdump-offline %s\n", version)
+		return
+	}
 
 	if singleFile != "" {
 		parseSingle(singleFile)
