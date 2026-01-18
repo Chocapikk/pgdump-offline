@@ -56,21 +56,51 @@ func DecodeTuple(tuple *HeapTupleData, columns []Column) map[string]interface{} 
 }
 
 func typeAlign(typID, length int) int {
-	if length == -1 {
-		return 1
-	}
+	// PostgreSQL type alignments from pg_type.dat
+	// 'd' = 8 (double), 'i' = 4 (int), 's' = 2 (short), 'c' = 1 (char)
+	
 	switch typID {
-	case OidInt8, OidFloat8, OidTimestamp, OidTimestampTZ:
+	// Double alignment (8 bytes)
+	case OidInt8, OidFloat8, OidTimestamp, OidTimestampTZ, OidTime, OidMoney:
 		return 8
-	case OidInt4, OidOid, OidFloat4:
+	case OidPoint, OidLseg, OidBox, OidLine, OidCircle: // geometric types
+		return 8
+	case OidInterval, OidTimeTZ: // 16 and 12 bytes but 'd' aligned
+		return 8
+		
+	// Int alignment (4 bytes)
+	case OidInt4, OidOid, OidFloat4, OidDate, OidXid, OidCid:
 		return 4
+	// Varlena types are 'i' aligned (4 bytes) for the header
+	case OidText, OidVarchar, OidBpchar, OidBytea, OidJSON, OidJSONB, OidXML:
+		return 4
+	case OidNumeric, OidInet, OidCidr, OidPath, OidPolygon:
+		return 4
+	case OidBit, OidVarbit, OidTsvector, OidTsquery, OidJSONPath:
+		return 4
+	case OidInt4Range, OidInt8Range, OidNumRange, OidDateRange, OidTsRange, OidTsTzRange:
+		return 4
+		
+	// Short alignment (2 bytes)
 	case OidInt2:
 		return 2
+		
+	// Char alignment (1 byte)
+	case OidBool, OidChar, OidUUID, OidMacaddr, OidMacaddr8:
+		return 1
 	}
-	if length == 4 {
+	
+	// Default based on length
+	if length == -1 {
+		return 4 // varlena default
+	}
+	if length >= 8 {
+		return 8
+	}
+	if length >= 4 {
 		return 4
 	}
-	if length == 2 {
+	if length >= 2 {
 		return 2
 	}
 	return 1
