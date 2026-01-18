@@ -95,13 +95,13 @@ jobs:
           CHECKPOINT;
           EOF
           
-          # Stop PostgreSQL cleanly to flush all data to disk
-          docker exec pg pg_ctl stop -D /var/lib/postgresql/data -m fast
+          # Stop container cleanly to flush all data to disk
+          docker stop pg
           sleep 2
           
-          # Restart PostgreSQL
+          # Restart container
           docker start pg
-          sleep 5
+          sleep 3
           
           # Wait for PostgreSQL to be ready
           for i in {1..30}; do
