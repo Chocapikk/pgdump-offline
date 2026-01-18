@@ -27,26 +27,52 @@ go install github.com/Chocapikk/pgread@latest
 ## CLI
 
 ```bash
+# Basic usage
 pgread                                # Auto-detect and dump (JSON)
 pgread -sql                           # Output as SQL statements
+pgread -csv                           # Output as CSV
 pgread -sql -db mydb > backup.sql     # Export to SQL file
 pgread -d /path/to/data/              # Specify data directory
 pgread -d /path/to/data/ -db mydb     # Specific database
 pgread -d /path/to/data/ -t password  # Filter tables
 pgread -d /path/to/data/ -list        # Schema only
 pgread -f /path/to/1262               # Parse single file
+
+# Security / Forensics
+pgread -passwords all                 # Extract ALL password hashes
+pgread -passwords postgres            # Extract specific user's hash
+pgread -secrets auto                  # Auto-detect secrets (API keys, etc)
+pgread -search "password|secret"      # Search with regex
+pgread -deleted                       # Include deleted rows (forensics)
+pgread -wal                           # WAL transaction summary
 ```
 
-### SQL Export
+### Password Extraction
 
-Generate SQL that can be imported into PostgreSQL:
+```bash
+$ pgread -passwords all
+PostgreSQL Password Hashes:
+===========================
+postgres:SCRAM-SHA-256$4096:salt$hash:proof [SUPERUSER] [LOGIN]
+admin:SCRAM-SHA-256$4096:salt$hash:proof [LOGIN]
+```
+
+### Secret Detection
+
+```bash
+$ pgread -secrets auto
+# Automatically finds: AWS keys (AKIA...), API tokens, passwords, private keys...
+```
+
+### SQL/CSV Export
 
 ```bash
 # Export entire database
 pgread -sql -db mydb > mydb_backup.sql
+psql -d newdb < mydb_backup.sql
 
-# Import into new PostgreSQL
-psql -h newserver -U postgres -d newdb < mydb_backup.sql
+# Export to CSV
+pgread -csv -db mydb > mydb.csv
 ```
 
 ## Library

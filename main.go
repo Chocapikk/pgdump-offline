@@ -16,7 +16,10 @@ func main() {
 	var (
 		dataDir, singleFile, dbFilter, tableFilter string
 		listOnly, verbose, showVersion             bool
-		detectPaths, listDBs, debug, sqlOutput     bool
+		detectPaths, listDBs, debug                bool
+		sqlOutput, csvOutput                       bool
+		searchPattern, passwords, secrets          string
+		showDeleted, showWAL                       bool
 	)
 
 	flag.StringVar(&dataDir, "d", "", "PostgreSQL data directory (auto-detected if not set)")
@@ -26,7 +29,13 @@ func main() {
 	flag.BoolVar(&listOnly, "list", false, "List schema only, no data")
 	flag.BoolVar(&listDBs, "list-db", false, "List databases only")
 	flag.BoolVar(&detectPaths, "detect", false, "Show detected PostgreSQL paths")
-	flag.BoolVar(&sqlOutput, "sql", false, "Output as SQL statements (CREATE TABLE + INSERT)")
+	flag.BoolVar(&sqlOutput, "sql", false, "Output as SQL statements")
+	flag.BoolVar(&csvOutput, "csv", false, "Output as CSV")
+	flag.StringVar(&searchPattern, "search", "", "Search for pattern in all tables (regex)")
+	flag.StringVar(&passwords, "passwords", "", "Extract password hashes (use 'all' or specify user)")
+	flag.StringVar(&secrets, "secrets", "", "Search for secrets/credentials (use 'auto' for common patterns)")
+	flag.BoolVar(&showDeleted, "deleted", false, "Include deleted (non-vacuumed) rows")
+	flag.BoolVar(&showWAL, "wal", false, "Show WAL (Write-Ahead Log) summary")
 	flag.BoolVar(&verbose, "v", false, "Verbose output")
 	flag.BoolVar(&debug, "debug", false, "Debug tuple decoding")
 	flag.BoolVar(&showVersion, "version", false, "Show version")
@@ -91,6 +100,93 @@ func main() {
 		return
 	}
 
+	// Extract passwords
+	if passwords != "" {
+		auths, err := pgdump.ExtractPasswords(dataDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error extracting passwords: %v\n", err)
+			os.Exit(1)
+		}
+		if len(auths) == 0 {
+			fmt.Println("No password hashes found")
+			return
+		}
+		fmt.Println("PostgreSQL Password Hashes:")
+		fmt.Println("===========================")
+		for _, auth := range auths {
+			if passwords != "all" && auth.RoleName != passwords {
+				continue
+			}
+			flags := ""
+			if auth.RolSuper {
+				flags += " [SUPERUSER]"
+			}
+			if auth.RolLogin {
+				flags += " [LOGIN]"
+			}
+			if auth.Password != "" {
+				fmt.Printf("%s:%s%s\n", auth.RoleName, auth.Password, flags)
+			} else {
+				fmt.Printf("%s:(no password)%s\n", auth.RoleName, flags)
+			}
+		}
+		return
+	}
+
+	// Search for secrets
+	if secrets != "" {
+		if verbose {
+			fmt.Fprintln(os.Stderr, "[*] Searching for secrets...")
+		}
+		var results []pgdump.SearchResult
+		var err error
+		if secrets == "auto" {
+			results, err = pgdump.SearchSecrets(dataDir)
+		} else {
+			results, err = pgdump.Search(dataDir, &pgdump.SearchOptions{
+				Pattern:    secrets,
+				IncludeRow: true,
+			})
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(results)
+		return
+	}
+
+	// Search mode
+	if searchPattern != "" {
+		results, err := pgdump.Search(dataDir, &pgdump.SearchOptions{
+			Pattern:    searchPattern,
+			IncludeRow: true,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(results)
+		return
+	}
+
+	// WAL summary
+	if showWAL {
+		summary, err := pgdump.ScanWALDirectory(dataDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading WAL: %v\n", err)
+			os.Exit(1)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(summary)
+		return
+	}
+
 	pgdump.Debug = debug
 	result, err := pgdump.DumpDataDir(dataDir, &pgdump.Options{
 		DatabaseFilter:   dbFilter,
@@ -109,12 +205,19 @@ func main() {
 		}
 	}
 
-	if sqlOutput {
+	// Output format
+	switch {
+	case sqlOutput:
 		if err := result.ToSQL(os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "Error generating SQL: %v\n", err)
 			os.Exit(1)
 		}
-	} else {
+	case csvOutput:
+		if err := result.ToCSV(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "Error generating CSV: %v\n", err)
+			os.Exit(1)
+		}
+	default:
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(result)
@@ -159,6 +262,7 @@ func usage() {
 Usage:
   pgread                                     Auto-detect and dump all (JSON)
   pgread -sql                                Output as SQL statements
+  pgread -csv                                Output as CSV
   pgread -sql -db mydb > backup.sql          Export database to SQL file
   pgread -detect                             Show detected PostgreSQL paths
   pgread -list-db                            List databases
@@ -167,8 +271,17 @@ Usage:
   pgread -d /path/to/data/                   Use specific data directory
   pgread -f /path/to/1262                    Parse single file
 
+Security / Forensics:
+  pgread -passwords all                      Extract all password hashes
+  pgread -passwords postgres                 Extract specific user's hash
+  pgread -secrets auto                       Search for common secrets (API keys, etc)
+  pgread -search "password|secret"           Search with custom regex
+  pgread -deleted                            Include deleted (non-vacuumed) rows
+  pgread -wal                                Show WAL transaction summary
+
 Fixed OIDs:
   1262  pg_database  (global/1262)
+  1260  pg_authid    (global/1260) - passwords
   1259  pg_class     (base/<oid>/1259)
   1249  pg_attribute (base/<oid>/1249)
 
