@@ -13,3 +13,4 @@ pgdump-offline-linux
 /tmp/
 coverage.out
 examples/grafana-lfi-lab/exploit/exploit
+examples/gitlab-traversal-lab/exploit/exploit
