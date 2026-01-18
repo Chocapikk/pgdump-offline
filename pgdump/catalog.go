@@ -15,6 +15,7 @@ type Column struct {
 	TypID int
 	Len   int
 	Num   int
+	Align byte // 'c'=1, 's'=2, 'i'=4, 'd'=8
 }
 
 // DatabaseInfo represents a database entry
@@ -35,6 +36,7 @@ type AttrInfo struct {
 	TypID int
 	Num   int
 	Len   int
+	Align byte // 'c'=1, 's'=2, 'i'=4, 'd'=8
 }
 
 // Predefined schemas for system catalogs
@@ -64,6 +66,7 @@ var (
 		{Name: "relkind", TypID: OidChar, Len: 1},
 	}
 
+	// PostgreSQL 12-15 pg_attribute structure
 	schemaPGAttrV15 = []Column{
 		{Name: "attrelid", TypID: OidOid, Len: 4},
 		{Name: "attname", TypID: OidName, Len: 64},
@@ -71,14 +74,22 @@ var (
 		{Name: "attstattarget", TypID: OidInt4, Len: 4},
 		{Name: "attlen", TypID: OidInt2, Len: 2},
 		{Name: "attnum", TypID: OidInt2, Len: 2},
+		{Name: "attndims", TypID: OidInt4, Len: 4}, // actually atttypmod (4) + attndims (2) but we need padding
+		{Name: "attbyval", TypID: OidBool, Len: 1},
+		{Name: "attalign", TypID: OidChar, Len: 1},
 	}
 
+	// PostgreSQL 16+ pg_attribute structure (attstattarget removed)
 	schemaPGAttrV16 = []Column{
 		{Name: "attrelid", TypID: OidOid, Len: 4},
 		{Name: "attname", TypID: OidName, Len: 64},
 		{Name: "atttypid", TypID: OidOid, Len: 4},
 		{Name: "attlen", TypID: OidInt2, Len: 2},
 		{Name: "attnum", TypID: OidInt2, Len: 2},
+		{Name: "atttypmod", TypID: OidInt4, Len: 4},
+		{Name: "attndims", TypID: OidInt2, Len: 2},
+		{Name: "attbyval", TypID: OidBool, Len: 1},
+		{Name: "attalign", TypID: OidChar, Len: 1},
 	}
 )
 
@@ -119,11 +130,19 @@ func ParsePGAttribute(data []byte, pgVersion int) map[uint32][]AttrInfo {
 		if relid == 0 || num <= 0 {
 			continue
 		}
+		
+		// Get alignment character ('c', 's', 'i', 'd')
+		var alignByte byte = 'i' // default to int alignment
+		if align := getString(row, "attalign"); len(align) > 0 {
+			alignByte = align[0]
+		}
+		
 		result[relid] = append(result[relid], AttrInfo{
 			Name:  getString(row, "attname"),
 			TypID: int(getOID(row, "atttypid")),
 			Num:   num,
 			Len:   toInt(row["attlen"]),
+			Align: alignByte,
 		})
 	}
 

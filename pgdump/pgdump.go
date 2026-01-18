@@ -163,7 +163,7 @@ func dumpTable(filenode uint32, info TableInfo, attrs []AttrInfo, reader FileRea
 
 	cols := make([]Column, len(attrs))
 	for i, a := range attrs {
-		cols[i] = Column{Name: a.Name, TypID: a.TypID, Len: a.Len, Num: a.Num}
+		cols[i] = Column{Name: a.Name, TypID: a.TypID, Len: a.Len, Num: a.Num, Align: a.Align}
 	}
 
 	t.Rows = ReadRows(data, cols, true)

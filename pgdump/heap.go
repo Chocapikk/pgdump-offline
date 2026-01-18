@@ -40,7 +40,12 @@ func DecodeTuple(tuple *HeapTupleData, columns []Column) map[string]interface{} 
 			num = idx + 1
 		}
 
-		offset = align(offset, typeAlign(col.TypID, col.Len))
+		// Use column's alignment from pg_attribute if available
+		colAlign := alignFromChar(col.Align)
+		if colAlign == 0 {
+			colAlign = typeAlign(col.TypID, col.Len)
+		}
+		offset = align(offset, colAlign)
 
 		if tuple.IsNull(num) {
 			result[col.Name] = nil
@@ -53,6 +58,22 @@ func DecodeTuple(tuple *HeapTupleData, columns []Column) map[string]interface{} 
 	}
 
 	return result
+}
+
+// alignFromChar converts PostgreSQL alignment char to bytes
+func alignFromChar(c byte) int {
+	switch c {
+	case 'c':
+		return 1
+	case 's':
+		return 2
+	case 'i':
+		return 4
+	case 'd':
+		return 8
+	default:
+		return 0 // unknown, use typeAlign fallback
+	}
 }
 
 func typeAlign(typID, length int) int {
